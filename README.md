@@ -1,7 +1,5 @@
 # NeuroWave: Exploring Microwave exposure effects on glial cells 
 
-# Microwave Stimulation Analysis Suite
-
 A comprehensive computational pipeline for analyzing cellular responses to microwave stimulation across multiple modalities: morphology, calcium dynamics, cytotoxicity, and transcriptomics.
 
 ## 📊 Overview
@@ -23,19 +21,17 @@ microwave_analysis/
 ├── .gitignore                    # Git ignore file
 ├── setup_environment.R           # Environment setup script
 ├── morphological_analysis/       # Cell morphology analysis
-│   ├── astrocyte_morphological_analysis.Rmd
-│   ├── microglia_morphological_analysis.Rmd
-│   ├── gbm_morphological_analysis.Rmd
+│   ├── Astrocyte_morphological_analysis.Rmd
+│   ├── Microglia_morphological_analysis.Rmd
+│   ├── GBM_morphological_analysis.Rmd
 ├── calcium_imaging/              # Calcium dynamics analysis
-│   ├── calcium_imaging_analysis.Rmd
-│   ├── functions/                # Core analysis functions
-│   └── example_traces/           # Example calcium traces
+│   ├── Calcium_Signalling_Analysis.Rmd
 ├── cytotoxicity_assay/           # LDH assay analysis
-│   ├── ldh_cytotoxicity_analysis.Rmd
+│   ├── Ldh_Cytotoxicity_Analysis.Rmd
 ├── transcriptomics/              # RNA-seq analysis
-│   ├── rnaseq_analysis_pipeline.Rmd
+│   ├── Transcriptomics_BulkSeq_Analysis.Rmd
 │   ├── msigdb_databases/         # Pathway databases
-└── utilities/                    # Utility scripts
+└──── 
 
 ```
 
