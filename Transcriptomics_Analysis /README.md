@@ -40,6 +40,57 @@ differential expression analysis, visualization, and pathway enrichment.
 3.  **Visualization**: Volcano plots and expression heatmaps
 4.  **Pathway Analysis**: GSEA using MSigDB databases
 5.  **Functional Interpretation**: Biological pathway interpretation
+# Usage Instructions
+
+## Quick Start
+
+1.  **Prepare Data**:
+    -   Count matrix (CSV with genes as rows, samples as columns)
+    -   Metadata file (CSV with sample information)
+2.  **Configure Analysis**:
+    -   Set file paths in the configuration section
+    -   Define contrast of interest (e.g., "Treatment - Control")
+3.  **Run Analysis**:
+    -   Use `run_rna_seq_analysis()` for comprehensive analysis
+    -   Or use individual functions for specific steps
+4.  **Review Results**:
+    -   Check output directory for results and plots
+    -   Review summary report for key findings
+
+## Customization Options
+
+-   **Statistical Thresholds**: Adjust p-value and fold-change
+    thresholds
+-   **Normalization Methods**: Change TMM to other methods as needed
+-   **Pathway Databases**: Select specific MSigDB databases
+-   **Visualization Styles**: Modify plot aesthetics in visualization
+    functions
+
+## Output Files
+
+The pipeline generates: - Differential expression results - GSEA pathway
+enrichment results - Multiple plot formats (PDF) - Summary statistics
+report - Processed data files
+
+## Troubleshooting
+
+-   **Memory Issues**: Filter genes more stringently or analyze subsets
+-   **Convergence Problems**: Increase permutation count in GSEA
+-   **Missing Gene Symbols**: Ensure proper annotation of count matrix
+-   **Design Matrix Errors**: Check metadata consistency with count
+    matrix
+
+------------------------------------------------------------------------
+
+*This transcriptomic analysis pipeline provides comprehensive
+differential expression and pathway analysis for RNA-seq data following
+microwave stimulation experiments. For technical support or custom
+modifications, please contact the authors.*
+
+**Citation**: If using this pipeline, please cite: Limma (Ritchie et
+al., 2015), edgeR (Robinson et al., 2010), and MSigDB (Liberzon et al.,
+2015) \`\`\`
+
 
 # Setup and Installation
 
@@ -935,53 +986,3 @@ direct_results <- analyze_astrocytes_direct()
 sessionInfo()
 ```
 
-# Usage Instructions
-
-## Quick Start
-
-1.  **Prepare Data**:
-    -   Count matrix (CSV with genes as rows, samples as columns)
-    -   Metadata file (CSV with sample information)
-2.  **Configure Analysis**:
-    -   Set file paths in the configuration section
-    -   Define contrast of interest (e.g., "Treatment - Control")
-3.  **Run Analysis**:
-    -   Use `run_rna_seq_analysis()` for comprehensive analysis
-    -   Or use individual functions for specific steps
-4.  **Review Results**:
-    -   Check output directory for results and plots
-    -   Review summary report for key findings
-
-## Customization Options
-
--   **Statistical Thresholds**: Adjust p-value and fold-change
-    thresholds
--   **Normalization Methods**: Change TMM to other methods as needed
--   **Pathway Databases**: Select specific MSigDB databases
--   **Visualization Styles**: Modify plot aesthetics in visualization
-    functions
-
-## Output Files
-
-The pipeline generates: - Differential expression results - GSEA pathway
-enrichment results - Multiple plot formats (PDF) - Summary statistics
-report - Processed data files
-
-## Troubleshooting
-
--   **Memory Issues**: Filter genes more stringently or analyze subsets
--   **Convergence Problems**: Increase permutation count in GSEA
--   **Missing Gene Symbols**: Ensure proper annotation of count matrix
--   **Design Matrix Errors**: Check metadata consistency with count
-    matrix
-
-------------------------------------------------------------------------
-
-*This transcriptomic analysis pipeline provides comprehensive
-differential expression and pathway analysis for RNA-seq data following
-microwave stimulation experiments. For technical support or custom
-modifications, please contact the authors.*
-
-**Citation**: If using this pipeline, please cite: Limma (Ritchie et
-al., 2015), edgeR (Robinson et al., 2010), and MSigDB (Liberzon et al.,
-2015) \`\`\`
