@@ -84,35 +84,6 @@ microwave_analysis/
   └── secondary_objects.csv  # Whole cell measurements
   ```
 
-#### Step 2: Run the analysis
-```r
-# Open the appropriate analysis script
-# For astrocytes:
-rmarkdown::render("morphological_analysis/astrocyte_morphological_analysis.Rmd",
-                  output_file = "astrocyte_analysis.html")
-
-# For microglia:
-rmarkdown::render("morphological_analysis/microglia_morphological_analysis.Rmd",
-                  output_file = "microglia_analysis.html")
-
-# For GBM cells:
-rmarkdown::render("morphological_analysis/gbm_morphological_analysis.Rmd",
-                  output_file = "gbm_analysis.html")
-```
-
-#### Step 3: Configure parameters
-Within the R Markdown file, update:
-- File paths to your data
-- Experimental conditions (MW status, exposure times, recovery times)
-- Analysis parameters (clustering methods, statistical tests)
-
-#### Step 4: Generate results
-The analysis will produce:
-- Processed data files
-- Statistical summaries
-- Publication-quality plots
-- HTML/PDF reports
-
 ### 2. Calcium Imaging Analysis
 
 **For analyzing GCaMP calcium traces:**
@@ -136,31 +107,6 @@ cutoff_fixed <- 0.2            # Activity threshold
 delta_multiplier <- 2          # Peak detection sensitivity
 ```
 
-#### Step 3: Run the pipeline
-```r
-source("calcium_imaging/functions/core_functions.R")
-source("calcium_imaging/functions/processing_functions.R")
-
-# Process a single file
-results <- analyze_calcium_file(
-  file_path = "your_file.csv",
-  result_path = "output_folder",
-  identifier = "experiment_name"
-)
-
-# Or process an entire folder
-all_results <- process_calcium_folder(
-  data_folder = "calcium_data",
-  result_folder = "calcium_results"
-)
-```
-
-#### Step 4: Analyze results
-The analysis generates:
-- Calcium trace visualizations
-- Event detection statistics
-- Firing rate calculations
-- Raster plots of activity
 
 ### 3. LDH Cytotoxicity Assay
 
@@ -198,19 +144,8 @@ Output includes:
 - Count matrix (genes × samples)
 - Metadata file (samples × conditions)
 
-#### Step 2: Run the analysis pipeline
-```r
-# Run complete analysis
-results <- run_rna_seq_analysis(
-  count_file = "counts_matrix.csv",
-  metadata_file = "sample_metadata.csv",
-  contrast = "Treatment - Control",
-  output_dir = "rnaseq_results",
-  species = "Homo sapiens"  # or "Mus musculus"
-)
-```
 
-#### Step 3: Explore results
+#### Step 2: Explore results
 The pipeline produces:
 - Differential expression results
 - Volcano plots
@@ -285,57 +220,6 @@ skip_correction <- TRUE        # Skip baseline correction
 - \*\*\* p < 0.001
 - ns not significant
 
-## 💻 Advanced Usage
-
-### Batch Processing
-
-Process multiple experiments automatically:
-
-```r
-# Example batch processing for morphology
-experiments <- c("exp1", "exp2", "exp3")
-for (exp in experiments) {
-  rmarkdown::render(
-    "morphological_analysis/astrocyte_morphological_analysis.Rmd",
-    output_file = paste0("results/", exp, "_analysis.html"),
-    params = list(data_path = paste0("data/", exp, "/"))
-  )
-}
-```
-
-### Custom Visualizations
-
-Modify plotting functions in `utilities/visualization_templates.R`:
-
-```r
-# Custom theme for publications
-theme_publication <- function(base_size = 12) {
-  theme_minimal(base_size = base_size) +
-    theme(
-      plot.title = element_text(face = "bold", hjust = 0.5),
-      axis.title = element_text(face = "bold"),
-      legend.position = "right",
-      panel.grid.minor = element_blank()
-    )
-}
-```
-
-### Integration with External Tools
-
-Export data for further analysis:
-
-```r
-# Export for Python analysis
-write_csv(processed_data, "data_for_python.csv")
-
-# Export for Prism/GraphPad
-write_xlsx(statistical_results, "results_for_prism.xlsx")
-
-# Create interactive plots
-library(plotly)
-ggplotly(your_ggplot_object)
-```
-
 ## 🔍 Troubleshooting
 
 ### Common Issues and Solutions
@@ -387,59 +271,6 @@ if(length(missing)) install.packages(missing)
 3. **Review log files**: Check R console output for warnings/errors
 4. **Use example data**: Test with provided example datasets first
 
-## 📚 Example Workflows
-
-### Complete Analysis Pipeline
-
-```r
-# 1. Set up environment
-source("setup_environment.R")
-
-# 2. Process morphology data
-source("morphological_analysis/process_morphology.R")
-morph_results <- analyze_morphology(
-  soma_path = "data/morphology/soma.csv",
-  cell_path = "data/morphology/cell.csv",
-  cell_type = "astrocyte"
-)
-
-# 3. Analyze calcium data
-source("calcium_imaging/process_calcium.R")
-calcium_results <- analyze_calcium_folder(
-  data_folder = "data/calcium",
-  result_folder = "results/calcium"
-)
-
-# 4. Generate integrated report
-rmarkdown::render(
-  "reports/integrated_analysis.Rmd",
-  output_file = "full_analysis_report.html",
-  params = list(
-    morph_data = morph_results,
-    calcium_data = calcium_results
-  )
-)
-```
-
-### Quick Quality Control
-
-```r
-# QC function for data validation
-perform_qc_check <- function(data_path) {
-  data <- read_csv(data_path)
-  
-  cat("Data dimensions:", dim(data), "\n")
-  cat("Missing values:", sum(is.na(data)), "\n")
-  cat("Column names:", colnames(data), "\n")
-  
-  # Generate summary statistics
-  summary(data)
-}
-
-# Run QC on each dataset
-perform_qc_check("data/morphology/primary_objects.csv")
-perform_qc_check("data/calcium/traces.csv")
-```
 
 ## 🤝 Contributing
 
