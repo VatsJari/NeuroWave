@@ -1,0 +1,1140 @@
+
+```r
+---
+title: "Calcium Imaging Analysis of GBM Cells Post-Microwave Stimulation"
+subtitle: "Functional Calcium Dynamics Analysis Pipeline"
+author: "Christophe Petry, Vatsal D. Jariwala / Department of Neurosurgery, Freiburg"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    fig_width: 10
+    fig_height: 6
+    df_print: paged
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  cache = FALSE,
+  fig.align = "center"
+)
+```
+
+# Project Overview
+
+This pipeline analyzes calcium dynamics in glioblastoma (GBM) cells following microwave stimulation. The analysis detects calcium transients, quantifies firing rates, and characterizes functional changes across experimental conditions.
+
+## Experimental Workflow
+
+1. **Calcium Imaging**: Live-cell imaging of GCaMP-expressing GBM cells
+2. **Data Acquisition**: Time-series recordings of fluorescence intensity
+3. **Signal Processing**: Baseline correction, peak detection, and event characterization
+4. **Statistical Analysis**: Comparison of functional parameters across conditions
+
+
+# Usage Instructions
+
+## Quick Start
+
+1. **Organize Data**: Place all CSV files in a single folder
+2. **Configure Parameters**: Set data and result paths in the analysis function
+3. **Run Analysis**: Execute `analyze_calcium_dataset()` with your paths
+4. **Review Results**: Check the results folder for plots and summary files
+
+## Customization Options
+
+- **Threshold Adjustment**: Modify `cutoff_fixed` parameter for cell classification
+- **Peak Detection Sensitivity**: Adjust `delta_multiplier` for peak detection
+- **Visualization Settings**: Modify plot parameters in visualization functions
+- **Statistical Methods**: Adjust statistical tests as needed
+
+## Output Files
+
+The pipeline generates:
+- Individual analysis files for each recording
+- Combined summary statistics
+- Statistical test results
+- Publication-quality plots
+- Comprehensive analysis report
+
+## Troubleshooting
+
+- **No Signaling Cells**: Increase `cutoff_fixed` or switch to `cutoff = "modular"`
+- **Poor Peak Detection**: Adjust `delta_multiplier` or pre-filter noisy cells
+- **Memory Issues**: Reduce `window_size` or analyze files individually
+
+---
+
+*This calcium imaging analysis pipeline was developed for GBM functional characterization following microwave stimulation. For technical support or custom modifications, please contact the authors.*
+
+**Citation**: If using this pipeline, please cite: Petry et al., 2024
+```
+
+
+# Setup and Installation
+
+## Package Management
+
+```{r package-setup, include=TRUE, warning=FALSE, message=FALSE}
+# Load required packages
+required_packages <- c(
+  # Data manipulation
+  "data.table", "tidyverse", "dplyr", "tidyr", "stringr",
+  # Visualization
+  "ggplot2", "plotly", "ggpubr", "see", "ggbeeswarm",
+  # Statistical analysis
+  "rstatix", "effsize", "beeswarm",
+  # Utilities
+  "kableExtra"
+)
+
+# Install missing packages
+missing_packages <- required_packages[!(required_packages %in% installed.packages()[ , "Package"])]
+if(length(missing_packages)) {
+  install.packages(missing_packages)
+}
+
+# Load all packages
+invisible(lapply(required_packages, library, character.only = TRUE))
+
+# Custom color palettes
+treatment_colors <- c("OFF" = "darkgrey", "ON" = "#E50000")
+condition_colors <- c("#E50000", "#008A8A", "#AF0076", "#E56800", 
+                     "#1717A0", "#E5AC00", "#00B700")
+```
+
+# Analysis Pipeline Functions
+
+## Core Processing Functions
+
+```{r core-functions, include=TRUE}
+# 1. Load and format raw data
+load_raw_data <- function(file_path, pattern = "Mean") {
+  raw_data <- read.csv(file_path)
+  column_indices <- grep(pattern, names(raw_data))
+  rawtrace <- raw_data[, column_indices]
+  return(rawtrace)
+}
+
+# 2. Prepare metadata and trace structure
+prepare_trace_metadata <- function(rawtrace, BG_number = 0, rec_time_min = 3, plot_mode = "plot", 
+                                   result_path = NULL, identifier = "") {
+  
+  cell_number <- ncol(rawtrace) - BG_number
+  rec_time_sec <- rec_time_min * 60
+  frame_rate_Hz <- nrow(rawtrace) / rec_time_sec
+  
+  # Rename columns
+  colnames(rawtrace)[1:cell_number] <- paste0("cell_", 1:cell_number)
+  rawtrace$Time <- 1:nrow(rawtrace)
+  rawtrace <- rawtrace[, c(ncol(rawtrace), 1:(ncol(rawtrace) - 1))] # move Time to first col
+  
+  # Optional 3D visualization
+  if (plot_mode != "no_plot") {
+    sample_of_traces <- sample(1:cell_number, min(100, cell_number))
+    plot_data <- data.table(rawtrace[, c("Time", paste0("cell_", sample_of_traces))])
+    plot_data <- melt(plot_data, id.vars = "Time")
+    
+    p <- plot_ly(plot_data, x = ~Time, y = ~variable, z = ~value, 
+                 type = 'scatter3d', mode = 'lines', color = ~variable,
+                 showlegend = FALSE) %>%
+      layout(title = paste("Raw Calcium Traces:", identifier),
+             scene = list(xaxis = list(title = "Time"),
+                          yaxis = list(title = "Cell"),
+                          zaxis = list(title = "Fluorescence")))
+    
+    handle_plot_output(p, mode = plot_mode, result_path = result_path, 
+                       filename = paste0(identifier, "_raw_trace_3D"))
+  }
+  
+  return(list(
+    rawtrace = rawtrace,
+    cell_number = cell_number,
+    rec_time_sec = rec_time_sec,
+    frame_rate_Hz = frame_rate_Hz,
+    time_raw = rawtrace$Time
+  ))
+}
+
+# 3. Rolling mean baseline correction
+baseline_correct_traces <- function(ca_traces, time_raw, window_size = 50) {
+  require(zoo)
+  
+  corrected <- apply(ca_traces, 2, function(trace) {
+    rolling_mean <- zoo::rollmean(trace, k = window_size, align = "center", fill = NA)
+    missing_indices <- which(is.na(rolling_mean))
+    complete_indices <- which(!is.na(rolling_mean))
+    
+    if (length(missing_indices) > 0 && length(complete_indices) > 1) {
+      train_df <- data.frame(x = time_raw[complete_indices], y = rolling_mean[complete_indices])
+      lm_model <- lm(y ~ x, data = train_df)
+      pred_df <- data.frame(x = time_raw[missing_indices])
+      rolling_mean[missing_indices] <- predict(lm_model, newdata = pred_df)
+    }
+    trace - rolling_mean
+  })
+  return(as.data.frame(corrected))
+}
+
+# 4. Classify cells into signaling and non-signaling
+classify_cells_by_amplitude <- function(
+  correctedtrace_crop,
+  rawtrace,
+  time_raw,
+  cell_number,
+  window_size = 50,
+  plot_mode = "plot",
+  result_path = NULL,
+  identifier = "",
+  cutoff = c("modular", "fixed"),
+  cutoff_fixed = 0.2
+) {
+  
+  cutoff <- match.arg(cutoff)
+  max_amplitude <- apply(correctedtrace_crop, 2, max, na.rm = TRUE)
+  mad_val <- mad(max_amplitude)
+  median_val <- median(max_amplitude)
+  
+  if (cutoff == "modular") {
+    cutoff_val <- median_val + mad_val
+  } else {
+    cutoff_val <- cutoff_fixed
+  }
+  
+  signal_idx <- which(max_amplitude > cutoff_val)
+  nonsignal_idx <- which(max_amplitude <= cutoff_val)
+  
+  if (length(signal_idx) == 0) {
+    message("No signaling cells detected — skipping classification.")
+    return(NULL)
+  }
+  
+  signalling <- correctedtrace_crop[, signal_idx, drop = FALSE]
+  signallingraw <- rawtrace[, signal_idx + 1, drop = FALSE]  # +1 for Time column
+  nonsignalling <- correctedtrace_crop[, nonsignal_idx, drop = FALSE]
+  
+  # Calculate percentage of active cells
+  active_percentage <- (length(signal_idx) / cell_number) * 100
+  
+  # Visualization
+  if (plot_mode != "no_plot") {
+    colors <- rainbow(max(ncol(signalling), ncol(nonsignalling)))
+    time_vec <- seq_len(nrow(signalling))
+    
+    # Signaling cells plot
+    p_signal <- ggplot() +
+      geom_line(data = data.frame(Time = rep(time_vec, ncol(signalling)),
+                                  Value = c(signalling),
+                                  Cell = rep(colnames(signalling), each = nrow(signalling))),
+                aes(x = Time, y = Value, color = Cell), alpha = 0.7) +
+      scale_color_viridis_d() +
+      labs(title = "Signaling Cells", x = "Time", y = "ΔF/F") +
+      theme_minimal() +
+      theme(legend.position = "none")
+    
+    handle_plot_output(p_signal, mode = plot_mode, result_path = result_path,
+                       filename = paste0(identifier, "_signaling_cells"))
+  }
+  
+  return(list(
+    signalling = signalling,
+    signallingraw = signallingraw,
+    nonsignalling = nonsignalling,
+    signal_idx = signal_idx,
+    nonsignal_idx = nonsignal_idx,
+    max_amplitude = max_amplitude[signal_idx],
+    cutoff = cutoff_val,
+    active_percentage = active_percentage,
+    n_signaling = length(signal_idx),
+    n_total = cell_number
+  ))
+}
+
+# 5. Peak detection algorithm (Robust implementation)
+peak_detection <- function(v, delta, x = NULL) {
+  if (is.null(x)) x <- seq_along(v)
+  if (length(v) != length(x)) stop("Input vectors v and x must have the same length")
+  if (!is.numeric(delta) || delta <= 0) stop("delta must be a positive numeric value")
+  
+  maxtab <- data.frame(pos = integer(), val = numeric())
+  mintab <- data.frame(pos = integer(), val = numeric())
+  mn <- Inf; mx <- -Inf
+  mnpos <- NA; mxpos <- NA
+  lookformax <- TRUE
+  
+  for (i in seq_along(v)) {
+    this <- v[i]
+    if (this > mx) { mx <- this; mxpos <- x[i] }
+    if (this < mn) { mn <- this; mnpos <- x[i] }
+    
+    if (lookformax && this < mx - delta) {
+      maxtab <- rbind(maxtab, data.frame(pos = mxpos, val = mx))
+      mn <- this; mnpos <- x[i]
+      lookformax <- FALSE
+    } else if (!lookformax && this > mn + delta) {
+      mintab <- rbind(mintab, data.frame(pos = mnpos, val = mn))
+      mx <- this; mxpos <- x[i]
+      lookformax <- TRUE
+    }
+  }
+  
+  list(maxtab = maxtab, mintab = mintab)
+}
+
+# 6. Detect peaks in all cells
+detect_peaks_all_cells <- function(corrected_traces, time_vector, delta_multiplier = 2) {
+  std_devs <- apply(corrected_traces, 2, sd, na.rm = TRUE)
+  delta <- delta_multiplier * mean(std_devs)
+  
+  peak_results <- list(
+    peak_times = list(),
+    peak_amplitudes = list(),
+    peak_matrix_max = matrix(NA, nrow = nrow(corrected_traces), ncol = ncol(corrected_traces)),
+    peak_matrix_min = matrix(NA, nrow = nrow(corrected_traces), ncol = ncol(corrected_traces))
+  )
+  
+  for (i in seq_len(ncol(corrected_traces))) {
+    trace <- corrected_traces[[i]]
+    peaks <- peak_detection(trace, delta, time_vector)
+    
+    peak_results$peak_times[[i]] <- peaks$maxtab$pos
+    peak_results$peak_amplitudes[[i]] <- peaks$maxtab$val
+    
+    if (nrow(peaks$maxtab) > 0) {
+      for (j in seq_len(nrow(peaks$maxtab))) {
+        peak_results$peak_matrix_max[peaks$maxtab$pos[j], i] <- peaks$maxtab$val[j]
+      }
+    }
+  }
+  
+  colnames(peak_results$peak_matrix_max) <- colnames(corrected_traces)
+  names(peak_results$peak_times) <- colnames(corrected_traces)
+  
+  return(peak_results)
+}
+
+# 7. Compute firing rate metrics
+compute_firing_metrics <- function(peak_times, recording_time_min) {
+  firing_rates <- sapply(peak_times, function(times) {
+    if (length(times) > 1) {
+      length(times) / recording_time_min
+    } else {
+      0
+    }
+  })
+  
+  p2p_intervals <- lapply(peak_times, function(times) {
+    if (length(times) >= 2) {
+      diff(times)
+    } else {
+      NA
+    }
+  })
+  
+  p2p_std <- sapply(p2p_intervals, function(intervals) {
+    if (length(intervals) >= 2 && !all(is.na(intervals))) {
+      sd(intervals, na.rm = TRUE)
+    } else {
+      NA
+    }
+  })
+  
+  return(list(
+    firing_rate = firing_rates,
+    p2p_intervals = p2p_intervals,
+    p2p_std = p2p_std
+  ))
+}
+
+# 8. Create raster plot of calcium events
+create_raster_plot <- function(peak_times, plot_mode = "plot", result_path = NULL, identifier = "") {
+  events <- data.frame()
+  for (i in seq_along(peak_times)) {
+    if (length(peak_times[[i]]) > 0) {
+      event_times <- peak_times[[i]]
+      cell_numbers <- rep(i, length(event_times))
+      cell_data <- data.frame(Cell = cell_numbers, Time = event_times)
+      events <- rbind(events, cell_data)
+    }
+  }
+  
+  if (nrow(events) > 0) {
+    p <- ggplot(events, aes(x = Time, y = factor(Cell))) +
+      geom_point(shape = "|", size = 2, alpha = 0.6) +
+      labs(title = "Calcium Event Raster Plot", 
+           x = "Time (frames)", 
+           y = "Cell") +
+      theme_minimal() +
+      theme(axis.text.y = element_text(size = 6))
+    
+    handle_plot_output(p, mode = plot_mode, result_path = result_path,
+                       filename = paste0(identifier, "_raster_plot"))
+    
+    return(p)
+  } else {
+    message("No events detected for raster plot")
+    return(NULL)
+  }
+}
+
+# 9. Extract peak-centered waveforms
+extract_peak_waveforms <- function(corrected_traces, peak_times, window_size = 200, 
+                                   plot_mode = "plot", result_path = NULL, identifier = "") {
+  
+  half_window <- window_size / 2
+  all_waveforms <- list()
+  waveform_counter <- 1
+  
+  for (cell_idx in seq_along(peak_times)) {
+    cell_peaks <- peak_times[[cell_idx]]
+    if (length(cell_peaks) > 0) {
+      for (peak_pos in cell_peaks) {
+        start <- max(1, peak_pos - half_window)
+        end <- min(nrow(corrected_traces), peak_pos + half_window - 1)
+        
+        if (end - start + 1 == window_size) {
+          waveform <- corrected_traces[start:end, cell_idx]
+          all_waveforms[[waveform_counter]] <- waveform
+          waveform_counter <- waveform_counter + 1
+        }
+      }
+    }
+  }
+  
+  if (length(all_waveforms) > 0) {
+    # Create aligned waveform plot
+    waveform_matrix <- do.call(cbind, all_waveforms)
+    
+    if (plot_mode != "no_plot") {
+      p <- ggplot(data.frame(Frame = 1:window_size, 
+                             Mean = rowMeans(waveform_matrix, na.rm = TRUE),
+                             SD = apply(waveform_matrix, 1, sd, na.rm = TRUE))) +
+        geom_ribbon(aes(x = Frame, ymin = Mean - SD, ymax = Mean + SD), alpha = 0.3, fill = "blue") +
+        geom_line(aes(x = Frame, y = Mean), color = "blue", size = 1) +
+        geom_vline(xintercept = half_window, linetype = "dashed", color = "red") +
+        labs(title = "Aligned Calcium Transients", 
+             x = "Frames (aligned to peak)", 
+             y = "ΔF/F") +
+        theme_minimal()
+      
+      handle_plot_output(p, mode = plot_mode, result_path = result_path,
+                         filename = paste0(identifier, "_aligned_waveforms"))
+    }
+    
+    return(waveform_matrix)
+  } else {
+    message("No complete waveforms extracted")
+    return(NULL)
+  }
+}
+```
+
+## Utility Functions
+
+```{r utility-functions, include=TRUE}
+# Plot handling function
+handle_plot_output <- function(p = NULL, plot_code = NULL, mode = "plot", 
+                               result_path = NULL, filename = "plot", 
+                               width = 10, height = 6, dpi = 300) {
+  
+  if (mode == "plot") {
+    if (!is.null(p)) {
+      print(p)
+    } else if (!is.null(plot_code)) {
+      plot_code()
+    }
+  } else if (mode == "save") {
+    if (is.null(result_path)) {
+      stop("result_path must be provided when mode = 'save'")
+    }
+    
+    # Ensure directory exists
+    if (!dir.exists(result_path)) {
+      dir.create(result_path, recursive = TRUE)
+    }
+    
+    full_path <- file.path(result_path, paste0(filename, ".png"))
+    
+    if (!is.null(p) && inherits(p, "ggplot")) {
+      ggsave(full_path, plot = p, width = width, height = height, dpi = dpi)
+    } else if (!is.null(p) && inherits(p, "plotly")) {
+      htmlwidgets::saveWidget(p, file = file.path(result_path, paste0(filename, ".html")))
+    } else if (!is.null(plot_code)) {
+      png(full_path, width = width, height = height, units = "in", res = dpi)
+      plot_code()
+      dev.off()
+    }
+  }
+}
+
+# Statistical helper functions
+compute_effect_size_r <- function(wilcox_result, n1, n2) {
+  z <- qnorm(wilcox_result$p.value / 2, lower.tail = FALSE) * sign(wilcox_result$statistic)
+  r <- z / sqrt(n1 + n2)
+  return(round(r, 3))
+}
+
+extract_metadata_from_filename <- function(filename) {
+  # Extract condition information from filename
+  # Customize this based on your naming convention
+  parts <- unlist(strsplit(gsub(".csv", "", filename), "_"))
+  
+  if (length(parts) >= 5) {
+    return(list(
+      cell_type = parts[1],
+      treatment = parts[2],
+      expo_time = parts[3],
+      recovery_time = parts[4],
+      replicate = parts[5]
+    ))
+  } else {
+    return(list(
+      cell_type = "Unknown",
+      treatment = "Unknown",
+      expo_time = "Unknown",
+      recovery_time = "Unknown",
+      replicate = "Unknown"
+    ))
+  }
+}
+```
+
+## Complete Analysis Pipeline for Single File
+
+```{r single-file-pipeline, include=TRUE}
+analyze_calcium_file <- function(
+  file_path,
+  result_path = NULL,
+  identifier = "",
+  plot_mode = "plot",
+  recording_time_min = 3,
+  window_size = 50,
+  delta_multiplier = 2,
+  cutoff_mode = "fixed",
+  cutoff_fixed = 0.2,
+  skip_correction = TRUE
+) {
+  
+  cat("Analyzing file:", basename(file_path), "\n")
+  
+  # Step 1: Load raw data
+  raw_trace <- load_raw_data(file_path, pattern = "Mean")
+  
+  # Step 2: Prepare metadata
+  trace_meta <- prepare_trace_metadata(
+    raw_trace, 
+    BG_number = 0, 
+    rec_time_min = recording_time_min,
+    plot_mode = plot_mode,
+    result_path = result_path,
+    identifier = identifier
+  )
+  
+  # Extract calcium traces
+  ca_traces <- trace_meta$rawtrace[, grep("cell_", names(trace_meta$rawtrace)), drop = FALSE]
+  
+  # Step 3: Baseline correction
+  corrected <- baseline_correct_traces(ca_traces, trace_meta$time_raw, window_size)
+  crop <- window_size / 2
+  corrected_crop <- corrected[crop:(nrow(corrected) - crop), ]
+  
+  # Step 4: Classify cells
+  cell_classification <- classify_cells_by_amplitude(
+    correctedtrace_crop = corrected_crop,
+    rawtrace = trace_meta$rawtrace,
+    time_raw = trace_meta$time_raw,
+    cell_number = trace_meta$cell_number,
+    window_size = window_size,
+    plot_mode = plot_mode,
+    result_path = result_path,
+    identifier = identifier,
+    cutoff = cutoff_mode,
+    cutoff_fixed = cutoff_fixed
+  )
+  
+  if (is.null(cell_classification)) {
+    message("No signaling cells detected in file: ", basename(file_path))
+    return(NULL)
+  }
+  
+  # Step 5: Use corrected signaling traces
+  if (skip_correction) {
+    final_signaling <- cell_classification$signalling
+  } else {
+    # Optional additional correction could be implemented here
+    final_signaling <- cell_classification$signalling
+  }
+  
+  # Create time vector for cropped data
+  time_corrected <- seq_len(nrow(final_signaling))
+  
+  # Step 6: Peak detection
+  peak_results <- detect_peaks_all_cells(final_signaling, time_corrected, delta_multiplier)
+  
+  # Step 7: Compute metrics
+  rec_time_min_crop <- length(time_corrected) * (trace_meta$rec_time_sec / nrow(trace_meta$rawtrace)) / 60
+  firing_metrics <- compute_firing_metrics(peak_results$peak_times, rec_time_min_crop)
+  
+  # Step 8: Create raster plot
+  raster_plot <- create_raster_plot(
+    peak_results$peak_times,
+    plot_mode = plot_mode,
+    result_path = result_path,
+    identifier = identifier
+  )
+  
+  # Step 9: Extract waveforms
+  waveforms <- extract_peak_waveforms(
+    final_signaling,
+    peak_results$peak_times,
+    window_size = 200,
+    plot_mode = plot_mode,
+    result_path = result_path,
+    identifier = identifier
+  )
+  
+  # Compile results
+  results <- list(
+    metadata = list(
+      filename = basename(file_path),
+      identifier = identifier,
+      recording_time_min = recording_time_min,
+      n_cells_total = trace_meta$cell_number,
+      n_cells_signaling = cell_classification$n_signaling,
+      active_percentage = cell_classification$active_percentage
+    ),
+    traces = list(
+      raw = raw_trace,
+      corrected = corrected_crop,
+      signaling = final_signaling
+    ),
+    classification = cell_classification,
+    peaks = peak_results,
+    metrics = list(
+      firing_rate = data.frame(
+        cell = colnames(final_signaling),
+        firing_rate_hz = firing_metrics$firing_rate,
+        p2p_std = firing_metrics$p2p_std
+      ),
+      amplitudes = cell_classification$max_amplitude,
+      active_percentage = cell_classification$active_percentage
+    ),
+    waveforms = waveforms,
+    plots = list(
+      raster = raster_plot
+    )
+  )
+  
+  # Save results
+  if (!is.null(result_path)) {
+    saveRDS(results, file.path(result_path, paste0(identifier, "_results.rds")))
+    cat("Results saved to:", file.path(result_path, paste0(identifier, "_results.rds")), "\n")
+  }
+  
+  return(results)
+}
+```
+
+# Batch Processing
+
+## Process Multiple Files
+
+```{r batch-processing, include=TRUE}
+process_calcium_folder <- function(
+  data_folder,
+  result_folder,
+  recording_time_min = 3,
+  plot_mode = "save",
+  window_size = 50,
+  delta_multiplier = 2,
+  cutoff_mode = "fixed",
+  cutoff_fixed = 0.2,
+  skip_correction = TRUE
+) {
+  
+  # Create result directory
+  if (!dir.exists(result_folder)) {
+    dir.create(result_folder, recursive = TRUE)
+  }
+  
+  # List CSV files
+  csv_files <- list.files(data_folder, pattern = "\\.csv$", full.names = TRUE)
+  
+  if (length(csv_files) == 0) {
+    stop("No CSV files found in folder: ", data_folder)
+  }
+  
+  cat("Found", length(csv_files), "CSV files\n")
+  
+  # Process each file
+  all_results <- list()
+  
+  for (file_path in csv_files) {
+    # Extract identifier from filename
+    filename <- basename(file_path)
+    file_id <- gsub("\\.csv$", "", filename)
+    
+    cat("\nProcessing:", filename, "\n")
+    
+    # Analyze file
+    results <- tryCatch({
+      analyze_calcium_file(
+        file_path = file_path,
+        result_path = result_folder,
+        identifier = file_id,
+        plot_mode = plot_mode,
+        recording_time_min = recording_time_min,
+        window_size = window_size,
+        delta_multiplier = delta_multiplier,
+        cutoff_mode = cutoff_mode,
+        cutoff_fixed = cutoff_fixed,
+        skip_correction = skip_correction
+      )
+    }, error = function(e) {
+      cat("Error processing", filename, ":", e$message, "\n")
+      return(NULL)
+    })
+    
+    if (!is.null(results)) {
+      all_results[[file_id]] <- results
+    }
+  }
+  
+  # Save combined results
+  if (length(all_results) > 0) {
+    saveRDS(all_results, file.path(result_folder, "all_calcium_results.rds"))
+    cat("\nCombined results saved to:", file.path(result_folder, "all_calcium_results.rds"), "\n")
+  }
+  
+  return(all_results)
+}
+
+# Example usage (commented out)
+# all_results <- process_calcium_folder(
+#   data_folder = "/path/to/your/data",
+#   result_folder = "/path/to/results",
+#   recording_time_min = 3,
+#   plot_mode = "save",
+#   cutoff_mode = "fixed",
+#   cutoff_fixed = 0.2
+# )
+```
+
+# Data Integration and Statistical Analysis
+
+## Combine Results from Multiple Files
+
+```{r combine-results, include=TRUE}
+extract_summary_statistics <- function(results_list) {
+  
+  summary_data <- data.frame()
+  
+  for (result_name in names(results_list)) {
+    result <- results_list[[result_name]]
+    
+    if (!is.null(result)) {
+      # Extract metadata from filename
+      meta_info <- extract_metadata_from_filename(result$metadata$filename)
+      
+      # Extract metrics
+      cell_metrics <- result$metrics$firing_rate
+      
+      # Add metadata to each cell's metrics
+      cell_metrics$file_id <- result_name
+      cell_metrics$cell_type <- meta_info$cell_type
+      cell_metrics$treatment <- meta_info$treatment
+      cell_metrics$expo_time <- meta_info$expo_time
+      cell_metrics$recovery_time <- meta_info$recovery_time
+      cell_metrics$replicate <- meta_info$replicate
+      
+      # Add file-level metrics
+      cell_metrics$active_percentage <- result$metadata$active_percentage
+      cell_metrics$n_cells_total <- result$metadata$n_cells_total
+      cell_metrics$n_cells_signaling <- result$metadata$n_cells_signaling
+      
+      summary_data <- rbind(summary_data, cell_metrics)
+    }
+  }
+  
+  return(summary_data)
+}
+
+# Example annotation based on condition codes
+annotate_experimental_conditions <- function(summary_data) {
+  
+  annotated_data <- summary_data %>%
+    mutate(
+      # Example mapping - adjust based on your experimental design
+      MW = case_when(
+        treatment %in% c("S", "Stim") ~ "ON",
+        treatment %in% c("C", "Ctrl") ~ "OFF",
+        TRUE ~ treatment
+      ),
+      # Convert times to numeric
+      Expo_Time = as.numeric(gsub("[^0-9]", "", expo_time)),
+      Recovery_Time = as.numeric(gsub("[^0-9]", "", recovery_time)),
+      # Create condition groups
+      Condition = paste(MW, Expo_Time, Recovery_Time, sep = "_")
+    )
+  
+  # Set factor levels for consistent ordering
+  annotated_data$MW <- factor(annotated_data$MW, levels = c("OFF", "ON"))
+  
+  return(annotated_data)
+}
+```
+
+## Statistical Testing and Visualization
+
+```{r statistical-analysis, include=TRUE}
+perform_statistical_analysis <- function(annotated_data) {
+  
+  # Prepare data for analysis
+  analysis_data <- annotated_data %>%
+    filter(!is.na(firing_rate_hz) & !is.na(MW)) %>%
+    group_by(Expo_Time, Recovery_Time) %>%
+    filter(n_distinct(MW) == 2) %>%
+    ungroup()
+  
+  if (nrow(analysis_data) == 0) {
+    message("Insufficient data for statistical analysis")
+    return(NULL)
+  }
+  
+  # Perform Wilcoxon tests with effect sizes
+  wilcox_results <- analysis_data %>%
+    group_by(Expo_Time, Recovery_Time) %>%
+    wilcox_test(firing_rate_hz ~ MW, paired = FALSE) %>%
+    adjust_pvalue(method = "BH") %>%
+    add_significance() %>%
+    add_effect_size(method = "r") %>%
+    mutate(
+      y.position = max(analysis_data$firing_rate_hz, na.rm = TRUE) * 1.1,
+      p.label = ifelse(p.adj < 0.001, "***",
+                       ifelse(p.adj < 0.01, "**",
+                              ifelse(p.adj < 0.05, "*", "ns")))
+    )
+  
+  return(list(
+    data = analysis_data,
+    stats = wilcox_results
+  ))
+}
+
+# Visualization Functions
+create_firing_rate_plot <- function(analysis_results, metric = "firing_rate_hz") {
+  
+  plot_data <- analysis_results$data
+  
+  p <- ggplot(plot_data, aes(x = MW, y = .data[[metric]], fill = MW)) +
+    geom_violinhalf(position = position_nudge(x = 0.1), alpha = 0.7, trim = TRUE) +
+    geom_boxplot(width = 0.15, outlier.shape = NA, alpha = 0.7) +
+    geom_beeswarm(size = 1, alpha = 0.5, cex = 0.8) +
+    facet_grid(factor(Expo_Time) ~ factor(Recovery_Time)) +
+    scale_fill_manual(values = treatment_colors) +
+    labs(
+      title = "Calcium Firing Rate Analysis",
+      x = "",
+      y = "Firing Rate (Hz)",
+      fill = "MW Status"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      strip.background = element_rect(fill = "grey90"),
+      strip.text = element_text(face = "bold")
+    )
+  
+  # Add statistical annotations if available
+  if (!is.null(analysis_results$stats) && nrow(analysis_results$stats) > 0) {
+    p <- p + stat_pvalue_manual(
+      analysis_results$stats,
+      label = "p.label",
+      tip.length = 0.01,
+      bracket.shorten = 0.05
+    )
+  }
+  
+  return(p)
+}
+
+create_active_cells_plot <- function(combined_data) {
+  
+  # Calculate active cell percentages per file
+  active_summary <- combined_data %>%
+    group_by(file_id, MW, Expo_Time, Recovery_Time) %>%
+    summarise(
+      active_percentage = first(active_percentage),
+      .groups = "drop"
+    )
+  
+  p <- ggplot(active_summary, aes(x = MW, y = active_percentage, fill = MW)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+    geom_jitter(width = 0.1, alpha = 0.5, size = 2) +
+    facet_grid(factor(Expo_Time) ~ factor(Recovery_Time)) +
+    scale_fill_manual(values = treatment_colors) +
+    labs(
+      title = "Percentage of Active Cells",
+      x = "",
+      y = "Active Cells (%)",
+      fill = "MW Status"
+    ) +
+    ylim(0, 100) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+  
+  return(p)
+}
+
+# Comprehensive analysis function
+analyze_calcium_dataset <- function(data_folder, result_folder) {
+  
+  cat("Starting comprehensive calcium analysis...\n")
+  
+  # Step 1: Process all files
+  cat("Step 1: Processing individual files...\n")
+  all_results <- process_calcium_folder(
+    data_folder = data_folder,
+    result_folder = result_folder,
+    plot_mode = "save"
+  )
+  
+  # Step 2: Extract and combine summary statistics
+  cat("Step 2: Combining results...\n")
+  summary_data <- extract_summary_statistics(all_results)
+  
+  # Step 3: Annotate experimental conditions
+  cat("Step 3: Annotating experimental conditions...\n")
+  annotated_data <- annotate_experimental_conditions(summary_data)
+  
+  # Step 4: Perform statistical analysis
+  cat("Step 4: Performing statistical analysis...\n")
+  stats_results <- perform_statistical_analysis(annotated_data)
+  
+  # Step 5: Create visualizations
+  cat("Step 5: Creating visualizations...\n")
+  plots <- list()
+  
+  # Firing rate plot
+  plots$firing_rate <- create_firing_rate_plot(stats_results)
+  
+  # Active cells plot
+  plots$active_cells <- create_active_cells_plot(annotated_data)
+  
+  # Additional metrics plots
+  if (!is.null(stats_results)) {
+    # P2P variability plot
+    p2p_analysis <- perform_statistical_analysis(
+      annotated_data %>% rename(firing_rate_hz = p2p_std)
+    )
+    plots$p2p_variability <- create_firing_rate_plot(p2p_analysis, "p2p_std")
+    
+    # Amplitude plot
+    amp_data <- annotated_data %>%
+      left_join(
+        bind_rows(lapply(all_results, function(x) {
+          data.frame(
+            cell = x$metrics$firing_rate$cell,
+            amplitude = x$metrics$amplitudes
+          )
+        }), .id = "file_id"),
+        by = c("file_id", "cell")
+      )
+    
+    amp_analysis <- perform_statistical_analysis(
+      amp_data %>% rename(firing_rate_hz = amplitude)
+    )
+    plots$amplitudes <- create_firing_rate_plot(amp_analysis, "amplitude")
+  }
+  
+  # Step 6: Save analysis report
+  cat("Step 6: Saving analysis report...\n")
+  
+  # Save all results
+  final_results <- list(
+    raw_results = all_results,
+    summary_data = summary_data,
+    annotated_data = annotated_data,
+    statistical_results = stats_results,
+    plots = plots
+  )
+  
+  saveRDS(final_results, file.path(result_folder, "final_analysis_results.rds"))
+  
+  # Create PDF report
+  pdf(file.path(result_folder, "calcium_analysis_report.pdf"), width = 11, height = 8.5)
+  for (plot_name in names(plots)) {
+    print(plots[[plot_name]])
+  }
+  dev.off()
+  
+  cat("\nAnalysis complete! Results saved to:", result_folder, "\n")
+  
+  return(final_results)
+}
+
+# Example usage (commented out)
+# final_analysis <- analyze_calcium_dataset(
+#   data_folder = "/path/to/calcium/data",
+#   result_folder = "/path/to/results"
+# )
+```
+
+# Example Analysis Workflow
+
+## Quick Start Example
+
+```{r example-workflow, eval=FALSE}
+# Example workflow for testing with sample data
+
+# 1. Set up paths
+data_folder <- "/path/to/your/calcium/data"
+results_folder <- "/path/to/results/output"
+
+# 2. Run complete analysis
+analysis_results <- analyze_calcium_dataset(
+  data_folder = data_folder,
+  result_folder = results_folder
+)
+
+# 3. View results
+print(analysis_results$plots$firing_rate)
+print(analysis_results$plots$active_cells)
+
+# 4. Access statistical results
+print(analysis_results$statistical_results$stats)
+
+# 5. Export summary table
+write_csv(analysis_results$summary_data, 
+          file.path(results_folder, "summary_statistics.csv"))
+```
+
+## Interactive Exploration
+
+```{r interactive-exploration, eval=FALSE}
+# Interactive exploration of results (requires Shiny or similar)
+
+explore_calcium_results <- function(results_path) {
+  # Load results
+  results <- readRDS(results_path)
+  
+  # Create interactive summary
+  summary_table <- results$summary_data %>%
+    group_by(MW, Expo_Time, Recovery_Time) %>%
+    summarise(
+      n_cells = n(),
+      mean_firing_rate = mean(firing_rate_hz, na.rm = TRUE),
+      sd_firing_rate = sd(firing_rate_hz, na.rm = TRUE),
+      mean_active_percent = mean(active_percentage, na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  return(list(
+    summary = summary_table,
+    plots = results$plots
+  ))
+}
+```
+
+# Export and Reporting
+
+```{r export-functions, include=TRUE}
+create_analysis_report <- function(analysis_results, output_file) {
+  
+  # Create markdown report
+  report_text <- c(
+    "# Calcium Imaging Analysis Report",
+    paste("Generated on:", Sys.Date()),
+    "",
+    "## Summary Statistics",
+    "",
+    "### Firing Rates by Condition",
+    "",
+    "```{r summary-table, echo=FALSE}",
+    "knitr::kable(analysis_results$summary_data %>%",
+    "  group_by(MW, Expo_Time, Recovery_Time) %>%",
+    "  summarise(",
+    "    N_Cells = n(),",
+    "    Mean_Firing = round(mean(firing_rate_hz, na.rm = TRUE), 3),",
+    "    SD_Firing = round(sd(firing_rate_hz, na.rm = TRUE), 3),",
+    "    Median_Firing = round(median(firing_rate_hz, na.rm = TRUE), 3),",
+    "    .groups = 'drop'",
+    "  ), caption = 'Firing Rate Summary')",
+    "```",
+    "",
+    "### Statistical Results",
+    "",
+    "```{r stats-table, echo=FALSE}",
+    "if(!is.null(analysis_results$statistical_results)) {",
+    "  knitr::kable(analysis_results$statistical_results$stats %>%",
+    "    select(Expo_Time, Recovery_Time, p.adj, p.adj.signif, effsize),",
+    "    caption = 'Wilcoxon Test Results')",
+    "}",
+    "```",
+    "",
+    "## Key Findings",
+    "",
+    "1. **Overall Pattern**: [Brief description of main findings]",
+    "2. **Treatment Effects**: [Describe MW effects]",
+    "3. **Time Dependencies**: [Describe exposure and recovery time effects]",
+    "",
+    "## Visualizations",
+    "",
+    "All plots have been saved to the results folder."
+  )
+  
+  writeLines(report_text, output_file)
+  cat("Report created:", output_file, "\n")
+}
+
+# Export summary data
+export_analysis_results <- function(analysis_results, output_dir) {
+  
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+  # Export summary data
+  write_csv(analysis_results$summary_data, 
+            file.path(output_dir, "calcium_summary_data.csv"))
+  
+  # Export statistical results
+  if (!is.null(analysis_results$statistical_results)) {
+    write_csv(analysis_results$statistical_results$stats,
+              file.path(output_dir, "statistical_results.csv"))
+  }
+  
+  # Save plots
+  for (plot_name in names(analysis_results$plots)) {
+    ggsave(
+      filename = file.path(output_dir, paste0(plot_name, ".png")),
+      plot = analysis_results$plots[[plot_name]],
+      width = 10, height = 8, dpi = 300
+    )
+  }
+  
+  # Save complete results
+  saveRDS(analysis_results, file.path(output_dir, "complete_analysis.rds"))
+  
+  cat("Results exported to:", output_dir, "\n")
+}
+```
+
+# Session Information
+
+```{r session-info, include=TRUE}
+sessionInfo()
+```
+
