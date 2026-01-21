@@ -1,4 +1,3 @@
-Here's the polished version of your Microglia morphological analysis script, organized professionally with duplicated code consolidated:
 
 ```r
 ---
