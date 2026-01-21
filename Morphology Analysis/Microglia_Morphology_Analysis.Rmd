@@ -4,7 +4,7 @@ Here's the polished version of your Microglia morphological analysis script, org
 ---
 title: "Microglia Morphological Analysis Post-Microwave Stimulation"
 subtitle: "Automated Analysis Pipeline for CellProfiler Output"
-author: "Your Name/Affiliation"
+author: "Vatsal D. Jariwala / Department of Neurosurgery, Freiburg"
 date: "`r format(Sys.Date(), '%B %d, %Y')`"
 output:
   html_document:
