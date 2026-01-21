@@ -908,5 +908,4 @@ write_csv(df_subsampled, file.path(output_dir, "subsampled_clustered_data.csv"))
 write_csv(cluster_proportions, file.path(output_dir, "cluster_proportions.csv"))
 write_csv(feature_importance, file.path(output_dir, "feature_importance.csv"))
 
-# Save UMAP coordinates
-write_csv(um
+```
