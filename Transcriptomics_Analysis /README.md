@@ -1,9 +1,8 @@
 
 ``` r
----
 title: "Transcriptomic Analysis of Astrocytes Post-Microwave Stimulation"
 subtitle: "Differential Expression and Pathway Analysis Pipeline"
-author: "Your Name/Affiliation"
+author: "Depro Das, Vatsal D. Jariwala / Department of Neurosurgery, Freiburg"
 date: "`r format(Sys.Date(), '%B %d, %Y')`"
 output:
   html_document:
@@ -16,7 +15,6 @@ output:
     fig_width: 10
     fig_height: 6
     df_print: paged
----
 ```
 
 ```{r setup, include=FALSE, warning=FALSE, message=FALSE}
