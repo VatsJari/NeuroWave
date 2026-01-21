@@ -1,11 +1,3 @@
----
-editor_options: 
-  markdown: 
-    wrap: 72
----
-
-Here's the polished version of your transcriptomics analysis script,
-organized professionally:
 
 ``` r
 ---
