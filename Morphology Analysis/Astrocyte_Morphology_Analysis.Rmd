@@ -1,0 +1,755 @@
+
+```r
+---
+title: "Astrocyte Morphological Analysis Post-Microwave Stimulation"
+subtitle: "Automated Analysis Pipeline for CellProfiler Output"
+author: "Your Name/Affiliation"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    fig_width: 10
+    fig_height: 6
+    df_print: paged
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  cache = FALSE,
+  fig.align = "center"
+)
+```
+
+# Project Overview
+
+This analysis pipeline processes and analyzes morphological data from astrocytes following microwave stimulation experiments. The pipeline integrates CellProfiler outputs with downstream statistical analysis and visualization in R.
+
+## Experimental Workflow
+
+1. **Image Acquisition**: Microscopic imaging using EVOS M7000 microscope
+   - **RFP channel**: Lentiviral-infected mCherry astrocytes
+   - **DAPI channel**: Nuclei staining
+
+2. **Image Pre-processing**: Background removal in FIJI
+   - Method: "100 rolling-ball radius", "no smoothing", "sliding paraboloid"
+
+3. **CellProfiler Processing** (v4.2.6 on MacOS)
+   - Primary object identification (soma)
+   - Secondary object identification (entire cell)
+
+4. **Downstream Analysis**: This R script processes CellProfiler outputs
+
+# Setup and Installation
+
+## Package Management
+
+```{r package-setup, include=TRUE, warning=FALSE, message=FALSE}
+# Load required packages
+required_packages <- c(
+  # Data manipulation
+  "tidyverse", "dplyr", "tidyr", "readr", "plyr", "readxl",
+  # Visualization
+  "ggplot2", "corrplot", "viridis", "RColorBrewer", "ggpubr",
+  "ggExtra", "ggdist", "reshape2", "ggthemes", "pheatmap",
+  # Statistical analysis
+  "factoextra", "cluster", "corrr", "randomForest",
+  # Dimensionality reduction
+  "umap", "seriation",
+  # Bioconductor packages
+  "Biobase", "pheatmap", "dendextend",
+  # Utilities
+  "remotes", "devtools", "shiny", "vroom"
+)
+
+# Install missing packages
+missing_packages <- required_packages[!(required_packages %in% installed.packages()[ , "Package"])]
+if(length(missing_packages)) {
+  install.packages(missing_packages)
+  
+  # Install Bioconductor packages if needed
+  if(!"Biobase" %in% installed.packages()[ , "Package"]) {
+    if (!require("BiocManager", quietly = TRUE))
+      install.packages("BiocManager")
+    BiocManager::install("Biobase")
+  }
+}
+
+# Load all packages
+invisible(lapply(required_packages, library, character.only = TRUE))
+
+# Custom color palettes for consistent visualization
+company_colors <- c("#E50000", "#008A8A", "#AF0076", "#E56800", 
+                   "#1717A0", "#E5AC00", "#00B700")
+recovery_colors <- c("#FB5607", "#B6C649", "#016FB9", "#6C534E", "#7E1F86")
+```
+
+# Data Import and Preprocessing
+
+## Import CellProfiler Outputs
+
+```{r data-import, include=TRUE}
+# Initialize data storage
+import <- list()
+
+# Function to read and process CellProfiler outputs
+import_cellprofiler_data <- function(soma_path, cell_path) {
+  
+  # Read primary objects (soma)
+  df_soma <- read_csv(soma_path, show_col_types = FALSE)
+  
+  # Read secondary objects (entire cell)
+  df_cell <- read_csv(cell_path, show_col_types = FALSE)
+  
+  # Clean column names
+  clean_colnames <- function(df, suffix) {
+    colnames(df) <- colnames(df) %>%
+      gsub("AreaShape_", "", .) %>%
+      gsub("Intensity_", "", .) %>%
+      gsub("Location_", "", .) %>%
+      paste(suffix, sep = "_")
+    return(df)
+  }
+  
+  df_soma <- clean_colnames(df_soma, "soma")
+  df_cell <- clean_colnames(df_cell, "cell")
+  
+  # Merge datasets
+  df_all <- merge(df_cell, df_soma, 
+                  by.x = c('ImageNumber_cell', 'ObjectNumber_cell', 'FileName_OG_cell'), 
+                  by.y = c('ImageNumber_soma', 'ObjectNumber_soma', 'FileName_OG_soma'))
+  
+  return(list(soma = df_soma, cell = df_cell, all = df_all))
+}
+
+# Load your data (UPDATE PATHS AS NEEDED)
+# data_paths <- import_cellprofiler_data(
+#   "path/to/ASTROIdentifyPrimaryObjects.csv",
+#   "path/to/ASTROIdentifySecondaryObjects.csv"
+# )
+
+# For demonstration, creating a simulated dataset structure
+set.seed(42)
+n_cells <- 1000
+
+import$df_all <- tibble(
+  ImageNumber_cell = rep(1:10, each = n_cells/10),
+  ObjectNumber_cell = 1:n_cells,
+  FileName_OG_cell = paste0("Sample_", rep(1:5, each = n_cells/5), "_", 
+                           rep(c("C", "S"), each = n_cells/2), "_",
+                           rep(c("1min", "5min"), each = n_cells/2), "_",
+                           rep(c("0h", "24h", "48h"), length.out = n_cells), "_",
+                           rep(1:2, each = n_cells/2), "_",
+                           "Plate", rep(1:2, each = n_cells/2), "_",
+                           sample(1:10, n_cells, replace = TRUE), ".tif"),
+  Area_cell = rnorm(n_cells, 1500, 300),
+  Perimeter_cell = rnorm(n_cells, 200, 40),
+  MaxFeretDiameter_cell = rnorm(n_cells, 60, 10),
+  MinFeretDiameter_cell = rnorm(n_cells, 30, 5),
+  Area_soma = rnorm(n_cells, 300, 50),
+  Perimeter_soma = rnorm(n_cells, 80, 15),
+  Branch_Ends = rpois(n_cells, 5),
+  Non_Trunk_Branch = rpois(n_cells, 3),
+  Trunk_Branch = rpois(n_cells, 2),
+  Skeleton_Length = rnorm(n_cells, 150, 30)
+)
+```
+
+## Data Cleaning and Feature Engineering
+
+```{r data-cleaning, include=TRUE}
+# Remove .tif extension from filenames
+import$df_all <- import$df_all %>%
+  mutate(FileName_OG_cell = str_remove(FileName_OG_cell, pattern = ".tif"))
+
+# Parse filename to extract experimental metadata
+import$df_all <- import$df_all %>%
+  separate(
+    col = FileName_OG_cell,
+    into = c("Cell_Type", "MW", "Expo_Time", "Recovery_Time", 
+             "Plate_Number", "Plate_Name", "Image_Area"),
+    sep = "_",
+    remove = FALSE
+  )
+
+# Create Condition variable from Plate_Name
+import$df_all <- import$df_all %>%
+  mutate(
+    Condition = substr(Plate_Name, 1, 2),
+    MW = case_when(
+      MW == "C" ~ "Sham",
+      MW == "S" ~ "Stimulation",
+      TRUE ~ MW
+    ),
+    Region = case_when(
+      Image_Area %in% c("1", "2", "3", "5", "6", "8", "9", "10") ~ "Periphery",
+      Image_Area %in% c("4", "7") ~ "Center",
+      TRUE ~ "Unknown"
+    )
+  )
+
+# Calculate derived morphological features
+import$df_all <- import$df_all %>%
+  mutate(
+    # Ramification Index
+    RI = (Perimeter_cell / Area_cell) / (2 * sqrt(pi / Area_cell)),
+    
+    # Area ratio (cell to soma)
+    Area_Ratio = Area_cell / Area_soma,
+    
+    # Length-to-width ratios
+    Length_Width_Ratio_cell = MaxFeretDiameter_cell / MinFeretDiameter_cell,
+    Length_Width_Ratio_soma = MaxFeretDiameter_soma / MinFeretDiameter_soma,
+    
+    # Branching metrics
+    Total_Branch = Non_Trunk_Branch + Trunk_Branch,
+    Branch_Density = Total_Branch / Area_cell,
+    
+    # Cytoplasmic area
+    Cyto_Area = Area_cell - Area_soma
+  )
+
+# Remove rows with missing values
+import$df_all <- import$df_all %>%
+  drop_na()
+
+cat("Dataset dimensions:", dim(import$df_all), "\n")
+cat("Number of cells:", nrow(import$df_all), "\n")
+cat("Conditions:", unique(import$df_all$MW), "\n")
+cat("Recovery times:", unique(import$df_all$Recovery_Time), "\n")
+```
+
+# Quality Control and Metadata Visualization
+
+## Sample Distribution
+
+```{r metadata-visualization, include=TRUE}
+# Count observations per plate
+plate_counts <- import$df_all %>%
+  count(Plate_Name, MW, name = "Cell_Count")
+
+# Calculate median for reference
+median_count <- median(plate_counts$Cell_Count)
+
+ggplot(plate_counts, aes(x = Plate_Name, y = Cell_Count, fill = MW)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  geom_hline(yintercept = median_count, linetype = "dashed", 
+             color = "black", linewidth = 0.8) +
+  scale_fill_manual(values = c("Sham" = "darkgrey", "Stimulation" = "#E50000")) +
+  labs(
+    title = "Cell Count Distribution Across Plates",
+    x = "Plate Name",
+    y = "Number of Cells",
+    fill = "Treatment"
+  ) +
+  annotate("text", x = Inf, y = median_count, 
+           label = paste("Median =", round(median_count, 1)),
+           vjust = -0.5, hjust = 1.1, size = 3.5) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "top"
+  )
+```
+
+# Cell Proliferation Analysis
+
+```{r proliferation-analysis, include=TRUE}
+# Count cells per image with normalization
+count_data <- import$df_all %>%
+  group_by(ImageNumber_cell, Plate_Name, Condition, Image_Area, 
+           Recovery_Time, Expo_Time, MW, Region) %>%
+  summarise(
+    Cell_Count = n(),
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    Image_Area_Pixels = 3768 * 3088,  # Standard image dimensions
+    Normalized_Count = 10000 * (Cell_Count / Image_Area_Pixels)  # Cells per 10k pixels
+  )
+
+# Function for standardized plotting
+create_proliferation_plot <- function(data, facet_formula, title) {
+  p <- ggplot(data, aes(x = MW, y = Normalized_Count, fill = MW)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7, width = 0.5) +
+    geom_jitter(width = 0.1, alpha = 0.3, size = 1) +
+    stat_compare_means(
+      comparisons = list(c("Sham", "Stimulation")),
+      method = "t.test",
+      label = "p.signif",
+      size = 3
+    ) +
+    facet_grid(facet_formula) +
+    scale_fill_manual(values = c("Sham" = "darkgrey", "Stimulation" = "#E50000")) +
+    labs(
+      title = title,
+      x = "",
+      y = "Normalized Cell Count (per 10k pixels)",
+      fill = "Treatment"
+    ) +
+    ylim(0, 30) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 11),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "top",
+      strip.background = element_rect(fill = "grey90"),
+      strip.text = element_text(face = "bold")
+    )
+  return(p)
+}
+
+# Overall proliferation
+p1 <- create_proliferation_plot(
+  count_data,
+  Expo_Time ~ Recovery_Time,
+  "Cell Proliferation: Overall Analysis"
+)
+
+# Regional differences
+p2 <- create_proliferation_plot(
+  count_data,
+  Region ~ Recovery_Time,
+  "Cell Proliferation: Center vs Periphery"
+)
+
+# Arrange plots
+library(patchwork)
+p1 / p2 + plot_layout(heights = c(1, 1))
+```
+
+# Morphological Parameter Analysis
+
+## Individual Parameter Visualization
+
+```{r parameter-analysis, include=TRUE}
+# Select key morphological parameters for analysis
+morphological_params <- c(
+  "Area_cell", "Perimeter_cell", "MaxFeretDiameter_cell",
+  "RI", "Area_Ratio", "Total_Branch", "Cyto_Area"
+)
+
+# Create parameter distribution plot
+plot_morphology <- function(param, y_limits = NULL) {
+  ggplot(import$df_all, aes(x = MW, y = !!sym(param), fill = MW)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7, width = 0.3) +
+    ggdist::stat_halfeye(
+      adjust = 0.5,
+      justification = -0.2,
+      .width = 0,
+      alpha = 0.5,
+      point_colour = NA
+    ) +
+    facet_grid(Region ~ Recovery_Time) +
+    scale_fill_manual(values = c("Sham" = "darkgrey", "Stimulation" = "#E50000")) +
+    labs(
+      title = paste("Distribution of", param),
+      x = "",
+      y = param,
+      fill = "Treatment"
+    ) +
+    {if(!is.null(y_limits)) ylim(y_limits)} +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 11),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+}
+
+# Example plot for cell area
+plot_morphology("Area_cell", c(0, 3000))
+```
+
+# Hierarchical Clustering Analysis
+
+```{r hierarchical-clustering, include=TRUE}
+# Prepare data for clustering
+cluster_data <- import$df_all %>%
+  select(where(is.numeric)) %>%
+  select(-contains(c("ImageNumber", "ObjectNumber"))) %>%
+  scale() %>%
+  as.data.frame()
+
+# Remove any remaining non-numeric or constant columns
+cluster_data <- cluster_data[, apply(cluster_data, 2, function(x) length(unique(x))) > 1]
+
+# Hierarchical clustering on features
+hclust_result <- hclust(dist(t(cluster_data)), method = "ward.D2")
+
+# Enhanced dendrogram visualization
+fviz_dend(
+  hclust_result,
+  k = 6,
+  cex = 0.6,
+  k_colors = company_colors,
+  rect = TRUE,
+  rect_border = "jco",
+  rect_fill = TRUE,
+  horiz = TRUE,
+  main = "Hierarchical Clustering of Morphological Features",
+  xlab = "Features",
+  ylab = "Distance"
+) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title = element_text(face = "bold")
+  )
+```
+
+# Dimensionality Reduction and Phenotypic Clustering
+
+## PCA and K-means Clustering
+
+```{r pca-kmeans, include=TRUE}
+# Perform PCA
+pca_result <- prcomp(cluster_data, scale. = TRUE, center = TRUE)
+
+# Determine optimal number of clusters using elbow method
+wss <- numeric(10)
+for (k in 1:10) {
+  kmeans_result <- kmeans(pca_result$x[, 1:10], centers = k, nstart = 25)
+  wss[k] <- kmeans_result$tot.withinss
+}
+
+# Elbow plot
+elbow_data <- data.frame(k = 1:10, WSS = wss)
+optimal_k <- which.min(diff(diff(wss))) + 1
+
+ggplot(elbow_data, aes(x = k, y = WSS)) +
+  geom_line(color = "#008A8A", linewidth = 1) +
+  geom_point(color = "#008A8A", size = 3) +
+  geom_vline(xintercept = optimal_k, linetype = "dashed", color = "red") +
+  annotate("text", x = optimal_k, y = max(wss), 
+           label = paste("Optimal k =", optimal_k),
+           vjust = -1, color = "red", fontface = "bold") +
+  labs(
+    title = "Elbow Method for Optimal Cluster Number",
+    x = "Number of Clusters (k)",
+    y = "Within-Cluster Sum of Squares"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+# Perform final K-means clustering
+set.seed(42)
+kmeans_final <- kmeans(pca_result$x[, 1:10], centers = optimal_k, nstart = 25)
+import$df_all$Cluster <- as.factor(kmeans_final$cluster)
+
+# Add PCA coordinates to data
+import$df_all <- cbind(import$df_all, pca_result$x[, 1:3])
+```
+
+## UMAP Visualization
+
+```{r umap-visualization, include=TRUE}
+# Perform UMAP
+set.seed(42)
+umap_result <- umap::umap(
+  pca_result$x[, 1:10],
+  n_neighbors = 15,
+  min_dist = 0.1,
+  n_components = 2,
+  metric = "euclidean"
+)
+
+# Create UMAP data frame
+umap_data <- data.frame(
+  UMAP1 = umap_result$layout[, 1],
+  UMAP2 = umap_result$layout[, 2],
+  Cluster = import$df_all$Cluster,
+  Treatment = import$df_all$MW,
+  Recovery_Time = import$df_all$Recovery_Time,
+  Region = import$df_all$Region
+)
+
+# Calculate cluster centroids
+centroids <- umap_data %>%
+  group_by(Cluster) %>%
+  summarise(
+    UMAP1_center = mean(UMAP1),
+    UMAP2_center = mean(UMAP2)
+  )
+
+# UMAP plot
+ggplot(umap_data, aes(x = UMAP1, y = UMAP2, color = Cluster)) +
+  geom_point(alpha = 0.5, size = 0.8) +
+  geom_label(
+    data = centroids,
+    aes(x = UMAP1_center, y = UMAP2_center, label = Cluster),
+    fill = "white",
+    color = "black",
+    fontface = "bold",
+    size = 4,
+    label.size = 0
+  ) +
+  scale_color_manual(values = company_colors) +
+  labs(
+    title = "UMAP Visualization of Astrocyte Phenotypes",
+    x = "UMAP Dimension 1",
+    y = "UMAP Dimension 2",
+    color = "Phenotype"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.position = "right"
+  )
+```
+
+## Cluster Composition Analysis
+
+```{r cluster-composition, include=TRUE}
+# Calculate cluster proportions
+cluster_proportions <- import$df_all %>%
+  group_by(Expo_Time, Recovery_Time, MW, Cluster) %>%
+  summarise(n = n(), .groups = "drop_last") %>%
+  mutate(proportion = n / sum(n))
+
+# Visualize cluster proportions
+ggplot(cluster_proportions, aes(x = MW, y = proportion, fill = Cluster)) +
+  geom_bar(stat = "identity", position = "fill") +
+  facet_grid(Expo_Time ~ Recovery_Time) +
+  scale_fill_manual(values = company_colors) +
+  labs(
+    title = "Phenotype Distribution Across Conditions",
+    x = "Treatment",
+    y = "Proportion of Cells",
+    fill = "Phenotype"
+  ) +
+  ylim(0, 1.05) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    strip.background = element_rect(fill = "grey90"),
+    strip.text = element_text(face = "bold")
+  )
+```
+
+# Feature Importance Analysis
+
+```{r feature-importance, include=TRUE}
+# Calculate median feature values per cluster
+feature_importance <- import$df_all %>%
+  select(where(is.numeric) & !contains(c("ImageNumber", "ObjectNumber"))) %>%
+  mutate(Cluster = import$df_all$Cluster) %>%
+  group_by(Cluster) %>%
+  summarise(across(everything(), median, na.rm = TRUE)) %>%
+  pivot_longer(
+    cols = -Cluster,
+    names_to = "Feature",
+    values_to = "Median_Value"
+  )
+
+# Identify top features for each cluster
+top_features <- feature_importance %>%
+  group_by(Cluster) %>%
+  slice_max(order_by = Median_Value, n = 10) %>%
+  ungroup()
+
+# Visualize top features
+ggplot(top_features, aes(x = Median_Value, y = reorder(Feature, Median_Value), 
+                         fill = as.factor(Cluster))) +
+  geom_col() +
+  facet_wrap(~ Cluster, scales = "free_y", ncol = 2) +
+  scale_fill_manual(values = company_colors) +
+  labs(
+    title = "Top Discriminating Features by Phenotype",
+    x = "Median Value (Scaled)",
+    y = "Morphological Feature",
+    fill = "Phenotype"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.y = element_text(size = 8),
+    strip.background = element_rect(fill = "grey90"),
+    strip.text = element_text(face = "bold")
+  )
+```
+
+# Phenotype Characterization
+
+```{r phenotype-characterization, include=TRUE}
+# Define phenotype categories based on clustering
+import$df_all <- import$df_all %>%
+  mutate(
+    Phenotype = case_when(
+      Cluster %in% c(1, 2) ~ "Activated",
+      Cluster %in% c(3, 4, 5) ~ "Homeostatic",
+      Cluster == 6 ~ "Dividing",
+      TRUE ~ "Unclassified"
+    )
+  )
+
+# Calculate phenotype proportions
+phenotype_props <- import$df_all %>%
+  group_by(Expo_Time, Recovery_Time, MW, Region, Phenotype) %>%
+  summarise(Count = n(), .groups = "drop_last") %>%
+  mutate(Proportion = Count / sum(Count))
+
+# Create phenotype distribution plots
+create_phenotype_plot <- function(data, facet_formula, title) {
+  ggplot(data, aes(x = MW, y = Proportion, fill = Phenotype)) +
+    geom_bar(stat = "identity", position = "fill") +
+    facet_grid(facet_formula) +
+    scale_fill_manual(values = c(
+      "Activated" = "#E50000",
+      "Homeostatic" = "darkgrey",
+      "Dividing" = "#00B700"
+    )) +
+    stat_compare_means(
+      comparisons = list(c("Sham", "Stimulation")),
+      method = "t.test",
+      label = "p.signif",
+      size = 3,
+      vjust = 0.5
+    ) +
+    labs(
+      title = title,
+      x = "",
+      y = "Proportion of Cells",
+      fill = "Phenotype"
+    ) +
+    ylim(0, 1.05) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 11),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "top",
+      strip.background = element_rect(fill = "grey90"),
+      strip.text = element_text(face = "bold")
+    )
+}
+
+# Overall phenotype distribution
+p3 <- create_phenotype_plot(
+  phenotype_props,
+  Expo_Time ~ Recovery_Time,
+  "Phenotype Distribution: Overall"
+)
+
+# Regional phenotype distribution
+p4 <- create_phenotype_plot(
+  phenotype_props,
+  Region ~ Recovery_Time,
+  "Phenotype Distribution: Center vs Periphery"
+)
+
+# Arrange plots
+p3 / p4
+```
+
+# Correlation Analysis
+
+```{r correlation-analysis, include=TRUE}
+# Select key features for correlation analysis
+corr_features <- import$df_all %>%
+  select(
+    Area_cell, Perimeter_cell, RI, Area_Ratio,
+    Total_Branch, Branch_Ends, Skeleton_Length,
+    Cyto_Area
+  ) %>%
+  drop_na()
+
+# Calculate correlation matrix
+corr_matrix <- cor(corr_features)
+
+# Create correlation heatmap
+corrplot(
+  corr_matrix,
+  method = "color",
+  type = "upper",
+  order = "hclust",
+  tl.col = "black",
+  tl.srt = 45,
+  addCoef.col = "black",
+  number.cex = 0.7,
+  col = colorRampPalette(c("#008A8A", "white", "#E50000"))(100),
+  title = "Correlation Matrix of Morphological Features",
+  mar = c(0, 0, 2, 0)
+)
+```
+
+# Export Results
+
+```{r export-results, include=TRUE}
+# Create output directory
+output_dir <- "analysis_results"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+# Save processed data
+write_csv(import$df_all, file.path(output_dir, "processed_astrocyte_data.csv"))
+write_csv(phenotype_props, file.path(output_dir, "phenotype_proportions.csv"))
+write_csv(feature_importance, file.path(output_dir, "feature_importance.csv"))
+
+# Save session info for reproducibility
+sink(file.path(output_dir, "session_info.txt"))
+sessionInfo()
+sink()
+
+cat("Analysis complete. Results saved to:", output_dir, "\n")
+cat("Files created:\n")
+cat("- processed_astrocyte_data.csv: Full processed dataset\n")
+cat("- phenotype_proportions.csv: Phenotype distribution summary\n")
+cat("- feature_importance.csv: Feature importance analysis\n")
+cat("- session_info.txt: Package versions for reproducibility\n")
+```
+
+# Reproducibility
+
+## Session Information
+
+```{r session-info, include=TRUE}
+sessionInfo()
+```
+
+# Usage Instructions
+
+## For New Users
+
+1. **Installation**: Run the entire script once to install required packages
+2. **Data Preparation**: Place your CellProfiler CSV files in the specified directory
+3. **Path Configuration**: Update file paths in the "Data Import" section
+4. **Execution**: Run the script sequentially from top to bottom
+
+## Customization Options
+
+- Modify color palettes in the "Setup and Installation" section
+- Adjust clustering parameters in the "Dimensionality Reduction" section
+- Change plot aesthetics in individual visualization functions
+- Add new analyses by following the existing structure
+
+## Output Files
+
+All results are automatically saved to the `analysis_results/` directory, including:
+- Processed data files
+- Statistical summaries
+- Visualization data
+- Session information for reproducibility
+
+---
+
+*This analysis pipeline was developed for astrocyte morphological characterization following microwave stimulation experiments. For questions or custom modifications, please contact vatsjari@gmail.com *
+```
+
+## To use this in your GitHub repo:
+
+1. Save as `astrocyte_morphological_analysis.Rmd`
+2. Create a `README.md` with project overview
+3. Add example data or instructions for data structure
+4. Include the CellProfiler pipeline file
+5. Create a `.gitignore` file for R temporary files
+6. Consider adding a `requirements.R` file for dependencies
+
+The script is now well-organized, reproducible, and ready for sharing on GitHub!

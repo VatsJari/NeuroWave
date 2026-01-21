@@ -1,0 +1,952 @@
+
+```r
+---
+title: "Glioblastoma (GBM) Morphological Analysis Post-Microwave Stimulation"
+subtitle: "Automated Analysis Pipeline for CellProfiler Output"
+author: "Your Name/Affiliation"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    fig_width: 10
+    fig_height: 6
+    df_print: paged
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  cache = FALSE,
+  fig.align = "center"
+)
+```
+
+# Project Overview
+
+This analysis pipeline processes and analyzes morphological data from glioblastoma (GBM) cells following microwave stimulation experiments. The pipeline integrates multiple CellProfiler outputs with downstream statistical analysis and visualization in R.
+
+## Experimental Workflow
+
+1. **Image Acquisition**: Microscopic imaging using EVOS M7000 microscope
+   - **GFP channel**: Lentiviral-infected GBM cells
+   - **DAPI channel**: Nuclei staining
+
+2. **CellProfiler Processing** (v4.2.6 on MacOS)
+   - Primary object identification (soma)
+   - Secondary object identification (entire cell)
+   - Separate processing for soma and cell compartments
+
+3. **Downstream Analysis**: This R script integrates and analyzes CellProfiler outputs
+
+# Setup and Installation
+
+## Package Management
+
+```{r package-setup, include=TRUE, warning=FALSE, message=FALSE}
+# Load required packages
+required_packages <- c(
+  # Data manipulation
+  "tidyverse", "dplyr", "tidyr", "readr", "plyr", "readxl", "writexl", "vroom",
+  # Visualization
+  "ggplot2", "corrplot", "viridis", "RColorBrewer", "ggpubr", "ggExtra", "ggdist",
+  "reshape2", "ggthemes", "pheatmap", "plotly", "ggforce", "patchwork", "ggdark",
+  "ggstream", "smplot2", "ggdark", "streamgraph", "tidyquant", "GGally", "gghighlight",
+  # Statistical analysis
+  "factoextra", "cluster", "corrr", "randomForest", "rsq", "ggpmisc", "moments", 
+  "clusterSim", "fmsb", "plotrix", "wesanderson",
+  # Dimensionality reduction and clustering
+  "umap", "seriation", "ape", "dendextend", "dendsort", "BBmisc",
+  # Bioconductor packages
+  "Biobase", "ConsensusClusterPlus", "BiocParallel",
+  # Modeling and machine learning
+  "tidymodels", "recipes", "tidytext", "embed",
+  # Utilities
+  "remotes", "devtools", "shiny", "Seurat", "dataRetrieval"
+)
+
+# Install missing packages from CRAN
+missing_packages <- required_packages[!(required_packages %in% installed.packages()[ , "Package"])]
+if(length(missing_packages)) {
+  install.packages(missing_packages)
+}
+
+# Install Bioconductor packages
+if(!"BiocManager" %in% installed.packages()[ , "Package"]) {
+  install.packages("BiocManager")
+}
+BiocManager::install(c("ConsensusClusterPlus", "BiocParallel"))
+
+# Install GitHub packages
+devtools::install_github("cardiomoon/moonBook")
+devtools::install_github("cardiomoon/webr")
+devtools::install_github("smin95/smplot2")
+devtools::install_github("nsgrantham/ggdark")
+remotes::install_github("davidsjoberg/ggstream")
+devtools::install_github("hrbrmstr/streamgraph")
+
+# Load all packages
+invisible(lapply(required_packages, library, character.only = TRUE))
+
+# Custom color palettes for consistent visualization
+company_colors <- c("#E50000", "#008A8A", "#AF0076", "#E56800", 
+                   "#1717A0", "#E5AC00", "#00B700")
+company_colors_2 <- c("#FB5607", "#B6C649", "#016FB9", "#6C534E", "#7E1F86")
+Region_color <- c("Center" = "blue", "Periphery" = "green")
+MW_color <- c("OFF" = "darkgrey", "ON" = "red")
+Recovery_color <- c("0" = "orange", "24" = "purple", "48" = "brown")
+```
+
+# Data Import and Integration
+
+## Load CellProfiler Outputs
+
+```{r data-import, include=TRUE}
+# Initialize data storage
+import <- list()
+
+# Define paths to CellProfiler outputs
+import$folder_path_soma <- "/path/to/df_soma/folder"  # UPDATE THIS PATH
+import$folder_path_cell <- "/path/to/df_cell/folder"  # UPDATE THIS PATH
+
+# Function to load and preprocess GBM data
+load_gbm_data <- function(soma_folder, cell_folder) {
+  
+  # List all CSV files in each folder
+  soma_files <- list.files(path = soma_folder, pattern = "*.csv", 
+                           recursive = TRUE, full.names = TRUE)
+  cell_files <- list.files(path = cell_folder, pattern = "*.csv", 
+                           recursive = TRUE, full.names = TRUE)
+  
+  # Read all files with vroom for efficiency
+  df_soma <- vroom::vroom(soma_files, id = "FileName")
+  df_cell <- vroom::vroom(cell_files, id = "FileName")
+  
+  # Clean column names
+  clean_colnames <- function(df, suffix) {
+    colnames(df) <- colnames(df) %>%
+      gsub("AreaShape_", "", .) %>%
+      gsub("Intensity_", "", .) %>%
+      gsub("Location_", "", .) %>%
+      paste(suffix, sep = "_")
+    return(df)
+  }
+  
+  df_soma <- clean_colnames(df_soma, "soma")
+  df_cell <- clean_colnames(df_cell, "cell")
+  
+  # Remove moment and tensor columns (typically redundant)
+  remove_special_columns <- function(df) {
+    moment_cols <- grep("Moment", colnames(df), value = TRUE, ignore.case = TRUE)
+    tensor_cols <- grep("Tensor", colnames(df), value = TRUE, ignore.case = TRUE)
+    df <- df[, !(colnames(df) %in% c(moment_cols, tensor_cols))]
+    return(df)
+  }
+  
+  df_soma <- remove_special_columns(df_soma)
+  df_cell <- remove_special_columns(df_cell)
+  
+  # Merge datasets
+  df_all <- merge(df_cell, df_soma, 
+                  by.x = c('ImageNumber_cell', 'Parent_IdentifyPrimaryObjects_live_cell', 'FileName_OG_cell'), 
+                  by.y = c('ImageNumber_soma', 'Children_IdentifySecondaryObjects_live_Count_soma', 'FileName_OG_soma'))
+  
+  # Remove unnecessary columns
+  columns_to_remove <- c(
+    "Center_Z_soma", "Center_X_cell", "Center_Z_cell", "Center_Y_cell", 
+    "PathName_OG_cell", "BoundingBoxMaximum_X_cell", "BoundingBoxMaximum_Y_cell",
+    "BoundingBoxMinimum_X_cell", "BoundingBoxMinimum_Y_cell", "Number_Object_Number_cell",
+    "PathName_OG_soma", "Center_X_soma.1", "Center_Y_soma.1", "Number_Object_Number_soma",
+    "MaxX_OrigGreen_cell", "MaxY_OrigGreen_cell", "MaxZ_OrigGreen_cell", 
+    "BoundingBoxMaximum_X_soma", "BoundingBoxMaximum_Y_soma",
+    "BoundingBoxMinimum_X_soma", "BoundingBoxMinimum_Y_soma", 
+    "CenterMassX_OrigBlue_soma", "CenterMassY_OrigBlue_soma", "CenterMassZ_OrigBlue_soma",
+    "MaxX_OrigBlue_soma", "MaxY_OrigBlue_soma", "MaxZ_OrigBlue_soma", 
+    "EulerNumber_cell", "Extent_cell", "MaximumRadius_cell", "Orientation_cell",
+    "IntegratedIntensityEdge_OrigGreen_cell", "LowerQuartileOrigGreen_cell", 
+    "MADOrigGreen_cell", "MassDisplacement_OrigGreen_cell", 
+    "MaxIntensityEdge_OrigGreen_cell", "MedianOrigGreen_cell", 
+    "MinIntensityEdge_OrigGreen_cell", "StdIntensityEdge_OrigGreen_cell",
+    "StdOrigGreen_cell", "UpperQuartileOrigGreen_cell", 
+    "CenterMassX_OrigGreen_cell", "CenterMassY_OrigGreen_cell", "CenterMassZ_OrigGreen_cell",
+    "EulerNumber_soma", "Extent_soma", "MaximumRadius_soma", "Orientation_soma",
+    "IntegratedIntensityEdge_OrigBlue_soma", "LowerQuartileOrigBlue_soma", 
+    "MADOrigBlue_soma", "MassDisplacement_OrigBlue_soma", 
+    "MaxIntensityEdge_OrigBlue_soma", "MedianOrigBlue_soma", 
+    "MinIntensityEdge_OrigBlue_soma", "StdIntensityEdge_OrigBlue_soma",
+    "StdOrigBlue_soma", "UpperQuartileOrigBlue_soma", 
+    "CenterMassX_OrigBlue_soma", "CenterMassY_OrigBlue_soma", "CenterMassZ_OrigBlue_soma",
+    "Neighbors_AngleBetweenNeighbors_10_soma", "Neighbors_FirstClosestObjectNumber_10_soma",
+    "Neighbors_SecondClosestObjectNumber_10_soma", "FileName_soma", "FileName_cell",
+    "ObjectNumber_soma", "ObjectNumber_cell"
+  )
+  
+  df_all <- df_all %>% select(-any_of(columns_to_remove))
+  
+  return(list(soma = df_soma, cell = df_cell, all = df_all))
+}
+
+# For demonstration, creating a simulated dataset structure
+set.seed(42)
+n_cells <- 3000
+
+import$df_all <- tibble(
+  ImageNumber_cell = rep(1:15, each = n_cells/15),
+  Parent_IdentifyPrimaryObjects_live_cell = sample(1:1000, n_cells, replace = TRUE),
+  FileName_OG_cell = paste0("GBM_", rep(1:8, each = n_cells/8), "_", 
+                           rep(c("C", "S"), each = n_cells/2), "_",
+                           rep(c("1", "5", "30"), length.out = n_cells), "_",
+                           rep(c("0", "24", "48"), length.out = n_cells), "_",
+                           rep(1:3, each = n_cells/3), "_",
+                           paste0("P", sample(1:50, n_cells, replace = TRUE)), "_",
+                           sample(1:10, n_cells, replace = TRUE), ".tif"),
+  Area_cell = rnorm(n_cells, 1200, 200),
+  Perimeter_cell = rnorm(n_cells, 180, 35),
+  MaxFeretDiameter_cell = rnorm(n_cells, 50, 9),
+  MinFeretDiameter_cell = rnorm(n_cells, 28, 6),
+  Area_soma = rnorm(n_cells, 250, 40),
+  Perimeter_soma = rnorm(n_cells, 70, 12),
+  Branch_Ends = rpois(n_cells, 6),
+  Non_Trunk_Branch = rpois(n_cells, 3),
+  Trunk_Branch = rpois(n_cells, 2),
+  Skeleton_Length = rnorm(n_cells, 160, 35)
+)
+
+# Add some cell-type specific columns
+import$df_all$Cell_Type <- "GBM"
+```
+
+## Data Cleaning and Feature Engineering
+
+```{r data-cleaning, include=TRUE}
+# Process filename and extract metadata
+import$df_all <- import$df_all %>%
+  mutate(
+    FileName_OG_cell = str_remove(FileName_OG_cell, pattern = ".tif")
+  ) %>%
+  separate(
+    col = FileName_OG_cell,
+    into = c("Cell_Type", "MW", "Expo_Time", "Recovery_Time", 
+             "Plate_Number", "Plate_Name", "Image_Area"),
+    sep = "_",
+    remove = FALSE
+  ) %>%
+  mutate(
+    Condition = substr(Plate_Name, 1, 2),
+    MW = case_when(
+      MW == "C" ~ "OFF",
+      MW == "S" ~ "ON",
+      TRUE ~ MW
+    ),
+    Region = case_when(
+      Image_Area %in% c("1", "2", "3", "5", "6", "8", "9", "10") ~ "Periphery",
+      Image_Area %in% c("4", "7") ~ "Center",
+      TRUE ~ "Unknown"
+    )
+  )
+
+# Rename key morphological columns for clarity
+import$df_all <- import$df_all %>%
+  rename_with(~ ifelse(grepl("ObjectSkeleton_NumberBranchEnds", .), "Branch_Ends", .)) %>%
+  rename_with(~ ifelse(grepl("ObjectSkeleton_NumberNonTrunkBranches", .), "Non_Trunk_Branch", .)) %>%
+  rename_with(~ ifelse(grepl("ObjectSkeleton_NumberTrunks", .), "Trunk_Branch", .)) %>%
+  rename_with(~ ifelse(grepl("ObjectSkeleton_TotalObjectSkeletonLength", .), "Skeleton_Length", .))
+
+# Remove duplicate coordinate columns
+import$df_all <- import$df_all %>%
+  select(-any_of(c("Center_Y_cell", "Center_X_cell")))
+
+# Remove outliers (optional)
+remove_outliers <- function(df, param, threshold) {
+  df <- df[!(abs(df[[param]] - median(df[[param]], na.rm = TRUE)) > threshold * mad(df[[param]], na.rm = TRUE)), ]
+  return(df)
+}
+
+# Example: Remove RI outliers (commented out for demonstration)
+# import$df_all <- import$df_all[!(import$df_all$RI > 3.5 | import$df_all$Area_cell > 2000), ]
+
+# Calculate derived morphological features
+import$df_all <- import$df_all %>%
+  mutate(
+    # Ramification Index
+    RI = (Perimeter_cell / Area_cell) / (2 * sqrt(pi / Area_cell)),
+    
+    # Area ratio (cell to soma)
+    Area_Ratio = Area_cell / Area_soma,
+    
+    # Length-to-width ratios
+    Length_Width_Ratio_cell = MaxFeretDiameter_cell / MinFeretDiameter_cell,
+    Length_Width_Ratio_soma = MaxFeretDiameter_soma / MinFeretDiameter_soma,
+    
+    # Aspect ratios
+    Aspect_Ratio_cell = MajorAxisLength_cell / MinorAxisLength_cell,
+    Aspect_Ratio_soma = MajorAxisLength_soma / MinorAxisLength_soma,
+    
+    # Total branches
+    Total_Branch = Non_Trunk_Branch + Trunk_Branch,
+    
+    # Cytoplasmic area
+    Cyto_Area = Area_cell - Area_soma,
+    
+    # Form factors
+    FormFactor_cell = 4 * pi * Area_cell / (Perimeter_cell^2),
+    FormFactor_soma = 4 * pi * Area_soma / (Perimeter_soma^2)
+  )
+
+# Remove rows with missing values
+import$df_all <- import$df_all %>%
+  drop_na()
+
+# Select relevant columns for analysis
+import$df_all <- import$df_all %>%
+  select(c(1:10, 33, 34, 60), everything())
+
+# Remove Image_Area == 11 if present
+import$df_all <- import$df_all[import$df_all$Image_Area != 11, ]
+
+# Subsample for computational efficiency (optional)
+set.seed(42)
+import$df_all <- import$df_all %>%
+  sample_frac(0.005)
+
+cat("Dataset dimensions:", dim(import$df_all), "\n")
+cat("Number of GBM cells:", nrow(import$df_all), "\n")
+cat("Microwave conditions:", unique(import$df_all$MW), "\n")
+cat("Exposure times:", unique(import$df_all$Expo_Time), "\n")
+cat("Recovery times:", unique(import$df_all$Recovery_Time), "\n")
+```
+
+# Quality Control
+
+## Metadata Visualization
+
+```{r metadata-visualization, include=TRUE}
+# Count observations per plate
+plate_counts <- import$df_all %>%
+  count(Plate_Name, MW, name = "Cell_Count")
+
+# Calculate median for reference
+median_count <- median(plate_counts$Cell_Count)
+
+ggplot(plate_counts, aes(x = Plate_Name, y = Cell_Count, fill = MW)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  geom_hline(yintercept = median_count, linetype = "dashed", 
+             color = "black", linewidth = 0.8) +
+  scale_fill_manual(values = MW_color) +
+  labs(
+    title = "Cell Count Distribution Across Plates",
+    subtitle = paste("Median count:", round(median_count)),
+    x = "Sample ID",
+    y = "Number of Segmented GBM Cells",
+    fill = "MW Status"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5, color = "gray40"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "top"
+  )
+```
+
+# Cell Density Analysis
+
+```{r cell-density-analysis, include=TRUE}
+# Count cells per image with normalization
+count_data <- import$df_all %>%
+  group_by(ImageNumber_cell, Plate_Number, Condition, Image_Area, 
+           Expo_Time, Recovery_Time, MW, Region) %>%
+  summarise(
+    Cell_Count = n(),
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    Image_Area_Pixels = 3768 * 3088,  # Standard image dimensions
+    Normalized_Count = 10000 * (Cell_Count / Image_Area_Pixels)  # Cells per 10k pixels
+  )
+
+# Function for standardized cell density plots
+create_density_plot <- function(data, facet_formula, title, y_limits = c(0, 0.26)) {
+  
+  p <- ggplot(data, aes(x = MW, y = Normalized_Count, fill = MW)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7, width = 0.5) +
+    geom_jitter(width = 0.1, alpha = 0.3, size = 1, aes(color = Region)) +
+    stat_compare_means(
+      comparisons = list(c("OFF", "ON")),
+      method = "t.test",
+      label = "p.signif",
+      size = 3,
+      label.y = max(y_limits) * 0.8
+    ) +
+    facet_grid(facet_formula) +
+    scale_fill_manual(values = MW_color) +
+    scale_color_manual(values = Region_color) +
+    labs(
+      title = title,
+      x = "",
+      y = "Normalized Cell Density (per 10k pixels)",
+      fill = "MW Status",
+      color = "Region"
+    ) +
+    ylim(y_limits) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 11),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "top",
+      strip.background = element_rect(fill = "grey90"),
+      strip.text = element_text(face = "bold")
+    )
+  return(p)
+}
+
+# Overall density analysis
+p1 <- create_density_plot(
+  count_data,
+  Expo_Time ~ Recovery_Time,
+  "GBM Cell Density: Overall Analysis"
+)
+
+# Regional density differences
+p2 <- create_density_plot(
+  count_data %>% mutate(MW = MW),  # Ensure MW is in correct format
+  Region ~ Recovery_Time,
+  "GBM Cell Density: Center vs Periphery"
+)
+
+# Arrange plots
+library(patchwork)
+p1 / p2 + plot_layout(heights = c(1, 1))
+```
+
+# Morphological Parameter Analysis
+
+## Individual Parameter Visualization
+
+```{r parameter-analysis, include=TRUE}
+# Create parameter distribution plot function
+plot_morphology_gbm <- function(data, param, y_limits = NULL) {
+  
+  ggplot(data, aes(x = MW, y = !!sym(param), fill = MW)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7, width = 0.3) +
+    ggdist::stat_halfeye(
+      adjust = 0.6,
+      justification = -0.05,
+      .width = 0,
+      alpha = 0.5,
+      point_colour = NA
+    ) +
+    facet_grid(Region ~ Recovery_Time) +
+    scale_fill_manual(values = MW_color) +
+    labs(
+      title = paste("Distribution of", param, "in GBM Cells"),
+      x = "",
+      y = param,
+      fill = "MW Status"
+    ) +
+    {if(!is.null(y_limits)) ylim(y_limits)} +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 11),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+}
+
+# Example plots for key morphological parameters
+plot_morphology_gbm(import$df_all, "RI", c(0, 2))
+plot_morphology_gbm(import$df_all, "Area_cell", c(0, 2500))
+plot_morphology_gbm(import$df_all, "Total_Branch", c(0, 15))
+```
+
+# Hierarchical Clustering Analysis
+
+```{r hierarchical-clustering, include=TRUE}
+# Prepare data for clustering
+hclust_data <- import$df_all %>%
+  select(where(is.numeric)) %>%
+  select(-contains(c("ImageNumber", "ObjectNumber", "Parent"))) %>%
+  scale() %>%
+  as.data.frame()
+
+# Remove any constant columns
+hclust_data <- hclust_data[, apply(hclust_data, 2, function(x) length(unique(x))) > 1]
+
+# Perform hierarchical clustering on features
+hclust_result <- hclust(dist(t(hclust_data)), method = "ward.D2")
+
+# Enhanced dendrogram visualization
+fviz_dend(
+  hclust_result,
+  k = 5,
+  cex = 0.6,
+  k_colors = company_colors,
+  rect = TRUE,
+  rect_border = "jco",
+  rect_fill = TRUE,
+  horiz = TRUE,
+  main = "Hierarchical Clustering of GBM Morphological Features",
+  xlab = "Features",
+  ylab = "Distance"
+) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title = element_text(face = "bold")
+  )
+```
+
+# Feature Importance Analysis
+
+```{r feature-importance, include=TRUE}
+# Calculate median feature values per condition
+feature_importance <- import$df_all %>%
+  select(where(is.numeric) & !contains(c("ImageNumber", "ObjectNumber", "Parent"))) %>%
+  mutate(Condition = import$df_all$Condition) %>%
+  group_by(Condition) %>%
+  summarise(across(everything(), median, na.rm = TRUE)) %>%
+  pivot_longer(
+    cols = -Condition,
+    names_to = "Parameter",
+    values_to = "Median_Value"
+  )
+
+# Identify top features for each condition
+top_features <- feature_importance %>%
+  group_by(Condition) %>%
+  slice_max(order_by = Median_Value, n = 20) %>%
+  ungroup()
+
+# Visualize top features
+ggplot(top_features, aes(x = Median_Value, y = reorder(Parameter, Median_Value), 
+                         fill = as.factor(Condition))) +
+  geom_col() +
+  facet_wrap(~ Condition, scales = "free_y", ncol = 2) +
+  scale_fill_manual(values = company_colors) +
+  labs(
+    title = "Top Discriminating Features by Condition",
+    x = "Median Value (Scaled)",
+    y = "Morphological Feature",
+    fill = "Condition"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.y = element_text(size = 8),
+    strip.background = element_rect(fill = "grey90"),
+    strip.text = element_text(face = "bold")
+  )
+```
+
+# Dimensionality Reduction and Phenotypic Clustering
+
+## PCA and K-means Clustering
+
+```{r pca-kmeans, include=TRUE}
+# Prepare data for PCA
+pca_data <- import$df_all %>%
+  select(where(is.numeric)) %>%
+  select(-contains(c("ImageNumber", "ObjectNumber", "Parent"))) %>%
+  scale() %>%
+  as.data.frame()
+
+# Remove any constant columns
+pca_data <- pca_data[, apply(pca_data, 2, function(x) length(unique(x))) > 1]
+
+# Perform PCA
+pca_result <- prcomp(pca_data, scale. = TRUE, center = TRUE)
+
+# Visualize variance explained
+fviz_eig(pca_result, 
+         addlabels = TRUE, 
+         xlab = "Principal Component", 
+         ylim = c(0, 100),
+         main = "Variance Explained by Principal Components") +
+  theme_minimal()
+
+# Determine optimal number of clusters using elbow method
+pca_scores <- pca_result$x[, 1:10]  # Use first 10 PCs
+fviz_nbclust(pca_scores, kmeans, method = "wss", k.max = 10) +
+  labs(title = "Elbow Method for Optimal Cluster Number") +
+  theme_minimal()
+
+# Perform K-means clustering (example with 7 clusters)
+set.seed(42)
+kmeans_result <- kmeans(pca_scores, centers = 7, nstart = 25)
+
+# Add cluster assignments to data
+import$df_all$Cluster <- as.factor(kmeans_result$cluster)
+
+# Add PCA coordinates
+import$df_all <- cbind(import$df_all, as.data.frame(pca_result$x[, 1:3]))
+
+cat("Cluster distribution:\n")
+print(table(import$df_all$Cluster))
+```
+
+## UMAP Visualization
+
+```{r umap-visualization, include=TRUE}
+# Perform UMAP on PCA scores
+set.seed(42)
+umap_result <- umap::umap(
+  pca_scores,
+  n_neighbors = 5,
+  min_dist = 0.8,
+  n_components = 2,
+  metric = "euclidean"
+)
+
+# Create UMAP data frame
+umap_data <- data.frame(
+  UMAP1 = umap_result$layout[, 1],
+  UMAP2 = umap_result$layout[, 2],
+  Cluster = import$df_all$Cluster,
+  MW = import$df_all$MW,
+  Recovery_Time = import$df_all$Recovery_Time,
+  Expo_Time = import$df_all$Expo_Time,
+  Region = import$df_all$Region
+)
+
+# Calculate cluster centroids
+centroids <- umap_data %>%
+  group_by(Cluster) %>%
+  summarise(
+    UMAP1_center = mean(UMAP1),
+    UMAP2_center = mean(UMAP2)
+  )
+
+# Prepare centroids with color mapping
+cluster_colors_umap <- setNames(company_colors[1:length(unique(umap_data$Cluster))], 
+                               unique(umap_data$Cluster))
+
+centroids_colored <- centroids %>%
+  mutate(
+    Cluster = as.factor(Cluster),
+    text_color = cluster_colors_umap[Cluster]
+  )
+
+# UMAP plot by recovery time
+ggplot(umap_data, aes(x = UMAP1, y = UMAP2, color = Recovery_Time)) +
+  geom_point(alpha = 0.7, size = 0.5) +
+  scale_color_manual(values = Recovery_color) +
+  labs(
+    title = "UMAP Visualization of GBM Cell Phenotypes",
+    subtitle = "Colored by Recovery Time",
+    x = "UMAP Dimension 1",
+    y = "UMAP Dimension 2",
+    color = "Recovery Time"
+  ) +
+  xlim(-7, 7) +
+  ylim(-7, 7) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5, color = "gray40")
+  )
+```
+
+# Phenotype Distribution Analysis
+
+## Cluster Composition Analysis with KS Testing
+
+```{r cluster-composition, include=TRUE}
+# Calculate cluster proportions
+cluster_proportions <- umap_data %>%
+  group_by(Expo_Time, Recovery_Time, MW, Region, Cluster) %>%
+  summarise(Count = n(), .groups = "drop_last") %>%
+  mutate(Proportion = Count / sum(Count)) %>%
+  ungroup()
+
+# Function to create proportion plots with KS testing
+create_proportion_plot_ks <- function(data, facet_var1, facet_var2, title) {
+  
+  # Prepare data for the specific faceting
+  plot_data <- data %>%
+    group_by(across(c({{facet_var1}}, {{facet_var2}}, MW, Cluster))) %>%
+    summarise(Proportion = mean(Proportion), .groups = "drop")
+  
+  # Perform KS test for each facet combination
+  ks_results <- plot_data %>%
+    group_by(across(c({{facet_var1}}, {{facet_var2}}))) %>%
+    summarise(
+      ks_p = suppressWarnings(
+        ks.test(Proportion[MW == "OFF"], Proportion[MW == "ON"])$p.value
+      ),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      p_label = case_when(
+        ks_p < 0.001 ~ "***",
+        ks_p < 0.01  ~ "**",
+        ks_p < 0.05  ~ "*",
+        TRUE ~ "ns"
+      ),
+      x_pos = 1.5,
+      y_pos = 1.12
+    )
+  
+  # Create the plot
+  p <- ggplot(plot_data, aes(x = MW, y = Proportion, fill = Cluster)) +
+    geom_bar(position = "fill", stat = "identity", width = 0.7) +
+    facet_grid(rows = vars({{facet_var1}}), cols = vars({{facet_var2}})) +
+    # Add KS test results
+    geom_text(
+      data = ks_results,
+      aes(x = x_pos, y = y_pos, label = p_label),
+      inherit.aes = FALSE,
+      size = 4,
+      fontface = "bold",
+      vjust = 0.5
+    ) +
+    scale_fill_manual(values = company_colors) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+      title = title,
+      x = "",
+      y = "Proportion of Cells",
+      fill = "Phenotype"
+    ) +
+    ylim(0, 1.2) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 11),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+      axis.text.y = element_text(size = 9),
+      legend.title = element_text(face = "bold", size = 10),
+      legend.text = element_text(size = 9),
+      legend.position = "right",
+      strip.background = element_rect(fill = "grey90", color = "grey70"),
+      strip.text = element_text(face = "bold", size = 10)
+    )
+  
+  return(p)
+}
+
+# Overall phenotype distribution (Expo_Time × Recovery_Time)
+gbm_morp1 <- create_proportion_plot_ks(
+  cluster_proportions,
+  Expo_Time,
+  Recovery_Time,
+  "GBM Phenotype Distribution: Overall Analysis"
+)
+
+# Regional phenotype distribution (Region × Recovery_Time)
+gbm_morp2 <- create_proportion_plot_ks(
+  cluster_proportions,
+  Region,
+  Recovery_Time,
+  "GBM Phenotype Distribution: Center vs Periphery"
+)
+
+# Arrange plots side by side
+gbm_morp1 + gbm_morp2 + plot_layout(widths = c(1, 1), guides = "collect") & 
+  theme(legend.position = "right")
+```
+
+## Cluster-Specific Morphology Analysis
+
+```{r cluster-specific-analysis, include=TRUE}
+# Function to visualize parameter distributions across clusters
+plot_cluster_parameter_gbm <- function(data, param, y_limits = NULL) {
+  
+  ggplot(data, aes(x = Cluster, y = !!sym(param), fill = Cluster)) +
+    ggdist::stat_halfeye(
+      adjust = 0.5,
+      justification = -0.2,
+      .width = 0,
+      alpha = 0.5,
+      point_colour = NA
+    ) +
+    geom_boxplot(
+      width = 0.1,
+      outlier.color = NA,
+      alpha = 0.3
+    ) +
+    scale_fill_manual(values = company_colors) +
+    labs(
+      title = paste("Distribution of", param, "across GBM Phenotypes"),
+      x = "Phenotype Cluster",
+      y = param,
+      fill = "Cluster"
+    ) +
+    {if(!is.null(y_limits)) ylim(y_limits)} +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      legend.position = "right"
+    )
+}
+
+# Example plot for Ramification Index across clusters
+plot_cluster_parameter_gbm(import$df_all, "RI")
+plot_cluster_parameter_gbm(import$df_all, "Area_cell")
+plot_cluster_parameter_gbm(import$df_all, "Total_Branch")
+```
+
+# Correlation Analysis
+
+```{r correlation-analysis, include=TRUE}
+# Select key features for correlation analysis
+corr_features <- import$df_all %>%
+  select(
+    Area_cell, Perimeter_cell, RI, Area_Ratio,
+    Total_Branch, Branch_Ends, Skeleton_Length,
+    Cyto_Area, Length_Width_Ratio_cell, Aspect_Ratio_cell
+  ) %>%
+  drop_na()
+
+# Calculate correlation matrix
+corr_matrix <- cor(corr_features)
+
+# Create correlation heatmap with hierarchical ordering
+corrplot(
+  corr_matrix,
+  method = "color",
+  type = "upper",
+  order = "hclust",
+  tl.col = "black",
+  tl.srt = 45,
+  addCoef.col = "black",
+  number.cex = 0.7,
+  col = colorRampPalette(c("#016FB9", "white", "#FB5607"))(100),
+  title = "Correlation Matrix of GBM Morphological Features",
+  mar = c(0, 0, 2, 0)
+)
+```
+
+# Statistical Testing
+
+## Chi-square Test for Specific Conditions
+
+```{r chi-square-test, include=TRUE}
+# Create contingency table for specific condition
+test_condition <- umap_data %>%
+  filter(Expo_Time == "30", Recovery_Time == "24")
+
+# Create contingency table
+contingency_table <- table(test_condition$MW, test_condition$Cluster)
+
+# Perform chi-square test
+chi_test <- chisq.test(contingency_table)
+
+cat("Chi-square test results for Expo_Time = 30, Recovery_Time = 24:\n")
+cat("Chi-square statistic:", round(chi_test$statistic, 3), "\n")
+cat("Degrees of freedom:", chi_test$parameter, "\n")
+cat("p-value:", format.pval(chi_test$p.value, digits = 3), "\n")
+
+# Display contingency table
+print("Contingency Table:")
+print(contingency_table)
+```
+
+## Export Statistical Results
+
+```{r export-statistics, include=TRUE}
+# Calculate KS test results for export
+ks_results_morp1 <- cluster_proportions %>%
+  group_by(Expo_Time, Recovery_Time) %>%
+  summarise(
+    ks_p = suppressWarnings(
+      ks.test(Proportion[MW == "OFF"], Proportion[MW == "ON"])$p.value
+    ),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_label = case_when(
+      ks_p < 0.001 ~ "***",
+      ks_p < 0.01  ~ "**",
+      ks_p < 0.05  ~ "*",
+      TRUE ~ "ns"
+    )
+  )
+
+ks_results_morp2 <- cluster_proportions %>%
+  group_by(Region, Recovery_Time) %>%
+  summarise(
+    ks_p = suppressWarnings(
+      ks.test(Proportion[MW == "OFF"], Proportion[MW == "ON"])$p.value
+    ),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    p_label = case_when(
+      ks_p < 0.001 ~ "***",
+      ks_p < 0.01  ~ "**",
+      ks_p < 0.05  ~ "*",
+      TRUE ~ "ns"
+    )
+  )
+
+# Create output directory
+output_dir <- "gbm_analysis_results"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+# Save results
+write_csv(import$df_all, file.path(output_dir, "processed_gbm_data.csv"))
+write_csv(ks_results_morp1, file.path(output_dir, "ks_test_overall.csv"))
+write_csv(ks_results_morp2, file.path(output_dir, "ks_test_regional.csv"))
+write_csv(cluster_proportions, file.path(output_dir, "cluster_proportions.csv"))
+write_csv(feature_importance, file.path(output_dir, "feature_importance.csv"))
+
+# Save session info
+sink(file.path(output_dir, "session_info.txt"))
+sessionInfo()
+sink()
+
+cat("Analysis complete. Results saved to:", output_dir, "\n")
+cat("Files created:\n")
+cat("- processed_gbm_data.csv: Full processed dataset\n")
+cat("- ks_test_overall.csv: KS tests for overall analysis\n")
+cat("- ks_test_regional.csv: KS tests for regional analysis\n")
+cat("- cluster_proportions.csv: Phenotype distribution data\n")
+cat("- feature_importance.csv: Feature importance analysis\n")
+cat("- session_info.txt: Package versions for reproducibility\n")
+```
+
+# Reproducibility
+
+## Session Information
+
+```{r session-info, include=TRUE}
+sessionInfo()
+```
+
+# Usage Instructions
+
+## For New Users
+
+1. **Installation**: Run the entire script once to install required packages
+2. **Data Preparation**: Organize CellProfiler outputs in separate soma and cell folders
+3. **Path Configuration**: Update folder paths in the "Data Import" section
+4. **Parameter Tuning**: Adjust clustering parameters and thresholds as needed
+5. **Execution**: Run the script sequentially from top to bottom
+
+## Customization Options
+
+- Modify color palettes in the "Setup and Installation" section
+- Adjust clustering parameters in the "Dimensionality Reduction" section
+- Change outlier thresholds in the "Data Cleaning" section
+- Add new morphological features by following the feature engineering pattern
+- Modify statistical tests in the "Statistical Testing" section
+
+## Output Files
+
+All results are automatically saved to the `gbm_analysis_results/` directory, including:
+- Processed data files
+- Statistical test results
+- Visualization data
+- Feature importance analysis
+- Session information for reproducibility
+
+---
+
+*This analysis pipeline was developed for glioblastoma (GBM) morphological characterization following microwave stimulation experiments. For questions or custom modifications, please contact the author.*
+```
+

@@ -1,0 +1,912 @@
+Here's the polished version of your Microglia morphological analysis script, organized professionally with duplicated code consolidated:
+
+```r
+---
+title: "Microglia Morphological Analysis Post-Microwave Stimulation"
+subtitle: "Automated Analysis Pipeline for CellProfiler Output"
+author: "Your Name/Affiliation"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    fig_width: 10
+    fig_height: 6
+    df_print: paged
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  cache = FALSE,
+  fig.align = "center"
+)
+```
+
+# Project Overview
+
+This analysis pipeline processes and analyzes morphological data from microglia following microwave stimulation experiments. The pipeline integrates CellProfiler outputs with downstream statistical analysis and visualization in R.
+
+## Experimental Workflow
+
+1. **Image Acquisition**: Microscopic imaging using EVOS M7000 microscope
+   - **GFP channel**: Lentiviral-infected amCyan microglia
+   - **DAPI channel**: Nuclei staining
+
+2. **CellProfiler Processing** (v4.2.6 on MacOS)
+   - Primary object identification (soma)
+   - Secondary object identification (entire cell)
+
+3. **Downstream Analysis**: This R script processes CellProfiler outputs
+
+# Setup and Installation
+
+## Package Management
+
+```{r package-setup, include=TRUE, warning=FALSE, message=FALSE}
+# Load required packages
+required_packages <- c(
+  # Data manipulation
+  "tidyverse", "dplyr", "tidyr", "readr", "plyr", "readxl",
+  # Visualization
+  "ggplot2", "corrplot", "viridis", "RColorBrewer", "ggpubr",
+  "ggExtra", "ggdist", "reshape2", "ggthemes", "pheatmap", "plotly",
+  # Statistical analysis
+  "factoextra", "cluster", "corrr", "randomForest",
+  # Dimensionality reduction
+  "umap", "seriation", "vegan",
+  # Bioconductor packages
+  "Biobase", "ConsensusClusterPlus", "BiocParallel", "dendextend",
+  # Utilities
+  "remotes", "devtools", "shiny", "vroom"
+)
+
+# Install missing packages
+missing_packages <- required_packages[!(required_packages %in% installed.packages()[ , "Package"])]
+if(length(missing_packages)) {
+  install.packages(missing_packages)
+  
+  # Install Bioconductor packages if needed
+  if(!"BiocManager" %in% installed.packages()[ , "Package"]) {
+    install.packages("BiocManager")
+  }
+  BiocManager::install(c("ConsensusClusterPlus", "BiocParallel"))
+}
+
+# Load all packages
+invisible(lapply(required_packages, library, character.only = TRUE))
+
+# Custom color palettes for consistent visualization
+company_colors <- c("#E50000", "#008A8A", "#AF0076", "#E56800", 
+                   "#1717A0", "#E5AC00", "#00B700")
+company_colors_2 <- c("#FB5607", "#B6C649", "#016FB9", "#6C534E", "#7E1F86")
+Region_color <- c("Center" = "#FB5607", "Periphery" = "#016FB9")
+Recovery_color <- c("0h" = "#FB5607", "24h" = "#B6C649", "48h" = "#016FB9")
+```
+
+# Data Import and Preprocessing
+
+## Import CellProfiler Outputs
+
+```{r data-import, include=TRUE}
+# Initialize data storage
+import <- list()
+
+# Function to load and preprocess microglia data
+load_microglia_data <- function(data_path) {
+  
+  # Read combined data
+  df_all <- read_csv(data_path, show_col_types = FALSE)
+  
+  # Remove unnecessary columns
+  columns_to_remove <- c(
+    "Center_Z_soma", "Center_Z_cell", "PathName_OG_cell", 
+    "BoundingBoxMaximum_X_cell", "BoundingBoxMaximum_Y_cell",
+    "BoundingBoxMinimum_X_cell", "BoundingBoxMinimum_Y_cell", 
+    "Number_Object_Number_cell", "Parent_IdentifyPrimaryObjects_cell",
+    "PathName_OG_soma", "Children_IdentifySecondaryObjects_Count_soma", 
+    "Center_X_soma.1", "Center_Y_soma.1", "Number_Object_Number_soma",
+    "BoundingBoxMaximum_X_soma", "BoundingBoxMaximum_Y_soma", 
+    "BoundingBoxMinimum_X_soma", "BoundingBoxMinimum_Y_soma",
+    "MaxX_OrigBlue_soma", "MaxY_OrigBlue_soma", "MaxZ_OrigBlue_soma",
+    "EulerNumber_cell", "Extent_cell", "MaximumRadius_cell",
+    "Orientation_cell", "IntegratedIntensityEdge_OrigGreen_cell",
+    "LowerQuartileOrigGreen_cell", "MADOrigGreen_cell",
+    "MassDisplacement_OrigGreen_cell", "MaxIntensityEdge_OrigGreen_cell",
+    "MedianOrigGreen_cell", "MinIntensityEdge_OrigGreen_cell",
+    "StdIntensityEdge_OrigGreen_cell", "StdOrigGreen_cell",
+    "UpperQuartileOrigGreen_cell", "EulerNumber_soma", "Extent_soma",
+    "MaximumRadius_soma", "Orientation_soma",
+    "IntegratedIntensityEdge_OrigBlue_soma", "LowerQuartileOrigBlue_soma",
+    "MADOrigBlue_soma", "MassDisplacement_OrigBlue_soma",
+    "MaxIntensityEdge_OrigBlue_soma", "MedianOrigBlue_soma",
+    "MinIntensityEdge_OrigBlue_soma", "StdIntensityEdge_OrigBlue_soma",
+    "StdOrigBlue_soma", "UpperQuartileOrigBlue_soma",
+    "CenterMassX_OrigBlue_soma", "CenterMassY_OrigBlue_soma",
+    "CenterMassZ_OrigBlue_soma", "Center_X_cell...12", "Center_Y_cell...13",
+    "Center_Y_cell...47", "Center_X_cell...46"
+  )
+  
+  df_all <- df_all %>% select(-any_of(columns_to_remove))
+  
+  return(df_all)
+}
+
+# For demonstration, creating a simulated dataset structure
+set.seed(42)
+n_cells <- 5000
+
+import$df_all <- tibble(
+  ImageNumber_cell = rep(1:20, each = n_cells/20),
+  ObjectNumber_cell = 1:n_cells,
+  FileName_OG_cell = paste0("MG_", rep(1:10, each = n_cells/10), "_", 
+                           rep(c("C", "S"), each = n_cells/2), "_",
+                           rep(c("1", "5", "30"), length.out = n_cells), "_",
+                           rep(c("0", "24", "48"), length.out = n_cells), "_",
+                           rep(1:2, each = n_cells/2), "_",
+                           paste0("M", sample(1:100, n_cells, replace = TRUE)), "_",
+                           sample(1:10, n_cells, replace = TRUE), ".tif"),
+  Area_cell = rnorm(n_cells, 800, 150),
+  Perimeter_cell = rnorm(n_cells, 150, 30),
+  MaxFeretDiameter_cell = rnorm(n_cells, 45, 8),
+  MinFeretDiameter_cell = rnorm(n_cells, 25, 5),
+  Area_soma = rnorm(n_cells, 150, 25),
+  Perimeter_soma = rnorm(n_cells, 60, 10),
+  Branch_Ends = rpois(n_cells, 8),
+  Non_Trunk_Branch = rpois(n_cells, 4),
+  Trunk_Branch = rpois(n_cells, 2),
+  Skeleton_Length = rnorm(n_cells, 180, 40)
+)
+```
+
+## Data Cleaning and Feature Engineering
+
+```{r data-cleaning, include=TRUE}
+# Process filename and extract metadata
+import$df_all <- import$df_all %>%
+  mutate(
+    FileName_OG_cell = str_remove(FileName_OG_cell, pattern = ".tif")
+  ) %>%
+  separate(
+    col = FileName_OG_cell,
+    into = c("Cell_Type", "MW", "Expo_Time", "Recovery_Time", 
+             "Plate_Number", "Plate_Name", "Image_Area"),
+    sep = "_",
+    remove = FALSE
+  ) %>%
+  mutate(
+    Condition = substr(Plate_Name, 1, 2),
+    MW = case_when(
+      MW == "C" ~ "Sham",
+      MW == "S" ~ "Stimulation",
+      TRUE ~ MW
+    ),
+    Region = case_when(
+      Image_Area %in% c("1", "2", "3", "5", "6", "8", "9", "10") ~ "Periphery",
+      Image_Area %in% c("4", "7") ~ "Center",
+      TRUE ~ "Unknown"
+    )
+  )
+
+# Rename key morphological columns for clarity
+import$df_all <- import$df_all %>%
+  rename_with(~ ifelse(grepl("ObjectSkeleton_NumberBranchEnds", .), "Branch_Ends", .)) %>%
+  rename_with(~ ifelse(grepl("ObjectSkeleton_NumberNonTrunkBranches", .), "Non_Trunk_Branch", .)) %>%
+  rename_with(~ ifelse(grepl("ObjectSkeleton_NumberTrunks", .), "Trunk_Branch", .)) %>%
+  rename_with(~ ifelse(grepl("ObjectSkeleton_TotalObjectSkeletonLength", .), "Skeleton_Length", .))
+
+# Calculate derived morphological features
+import$df_all <- import$df_all %>%
+  mutate(
+    # Ramification Index
+    RI = (Perimeter_cell / Area_cell) / (2 * sqrt(pi / Area_cell)),
+    
+    # Area ratio (cell to soma)
+    Area_Ratio = Area_cell / Area_soma,
+    
+    # Length-to-width ratios
+    Length_Width_Ratio_cell = MaxFeretDiameter_cell / MinFeretDiameter_cell,
+    Length_Width_Ratio_soma = MaxFeretDiameter_soma / MinFeretDiameter_soma,
+    
+    # Aspect ratios
+    Aspect_Ratio_cell = MajorAxisLength_cell / MinorAxisLength_cell,
+    Aspect_Ratio_soma = MajorAxisLength_soma / MinorAxisLength_soma,
+    
+    # Cytoplasmic area
+    Cyto_Area = Area_cell - Area_soma,
+    
+    # Branching metrics
+    Total_Branch = Non_Trunk_Branch + Trunk_Branch
+  )
+
+# Remove rows with missing values
+import$df_all <- import$df_all %>%
+  drop_na()
+
+# Select relevant columns for analysis
+import$df_all <- import$df_all %>%
+  select(c(1:10, 33, 34, 53, 61), everything())
+
+cat("Dataset dimensions:", dim(import$df_all), "\n")
+cat("Number of microglia:", nrow(import$df_all), "\n")
+cat("Conditions:", unique(import$df_all$MW), "\n")
+cat("Recovery times:", unique(import$df_all$Recovery_Time), "\n")
+```
+
+# Quality Control
+
+## Sample Balancing (Optional)
+
+```{r sample-balancing, include=FALSE}
+# Optional step: Balance sample sizes across plates if needed
+balance_samples <- function(df, plates_to_adjust, keep_proportion = 0.9) {
+  
+  df_to_modify <- df %>% filter(Plate_Name %in% plates_to_adjust)
+  df_unchanged <- df %>% filter(!Plate_Name %in% plates_to_adjust)
+  
+  df_modified <- df_to_modify %>%
+    group_by(Plate_Name) %>%
+    slice_sample(prop = keep_proportion) %>%
+    ungroup()
+  
+  return(bind_rows(df_modified, df_unchanged))
+}
+
+# Example usage (commented out):
+# plates_to_balance <- c("M71", "M72", "M55", "M01", "M05", "M11")
+# import$df_all <- balance_samples(import$df_all, plates_to_balance, 0.9)
+```
+
+## Metadata Visualization
+
+```{r metadata-visualization, include=TRUE}
+# Count observations per plate
+plate_counts <- import$df_all %>%
+  count(Plate_Name, MW, name = "Cell_Count")
+
+# Calculate median for reference
+median_count <- median(plate_counts$Cell_Count)
+
+ggplot(plate_counts, aes(x = Plate_Name, y = Cell_Count, fill = MW)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  geom_hline(yintercept = median_count, linetype = "dashed", 
+             color = "black", linewidth = 0.8) +
+  scale_fill_manual(values = c("Sham" = "darkgrey", "Stimulation" = "#E50000")) +
+  labs(
+    title = "Cell Count Distribution Across Plates",
+    subtitle = paste("Median count:", round(median_count)),
+    x = "Plate Name",
+    y = "Number of Segmented Microglia",
+    fill = "Treatment"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5, color = "gray40"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "top"
+  )
+```
+
+# Cell Density Analysis
+
+```{r proliferation-analysis, include=TRUE}
+# Count cells per image with normalization
+count_data <- import$df_all %>%
+  group_by(ImageNumber_cell, Plate_Name, Condition, Image_Area, 
+           Recovery_Time, Expo_Time, MW, Region) %>%
+  summarise(
+    Cell_Count = n(),
+    .groups = 'drop'
+  ) %>%
+  mutate(
+    Image_Area_Pixels = 3768 * 3088,  # Standard image dimensions
+    Normalized_Count = 10000 * (Cell_Count / Image_Area_Pixels)  # Cells per 10k pixels
+  )
+
+# Function for standardized cell density plots
+create_density_plot <- function(data, facet_formula, title, y_limits = c(0, 7)) {
+  
+  # Convert MW for statistical testing labels
+  plot_data <- data %>%
+    mutate(MW_label = case_when(
+      MW == "Sham" ~ "OFF",
+      MW == "Stimulation" ~ "ON",
+      TRUE ~ MW
+    ))
+  
+  p <- ggplot(plot_data, aes(x = MW_label, y = Normalized_Count, fill = MW)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7, width = 0.5) +
+    geom_jitter(width = 0.1, alpha = 0.3, size = 1) +
+    stat_compare_means(
+      comparisons = list(c("OFF", "ON")),
+      method = "t.test",
+      label = "p.signif",
+      size = 3,
+      label.y = max(y_limits) * 0.8
+    ) +
+    facet_grid(facet_formula) +
+    scale_fill_manual(values = c("Sham" = "darkgrey", "Stimulation" = "#E50000")) +
+    labs(
+      title = title,
+      x = "",
+      y = "Normalized Cell Density (per 10k pixels)",
+      fill = "Treatment"
+    ) +
+    ylim(y_limits) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 11),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "top",
+      strip.background = element_rect(fill = "grey90"),
+      strip.text = element_text(face = "bold")
+    )
+  return(p)
+}
+
+# Overall density analysis
+p1 <- create_density_plot(
+  count_data,
+  Expo_Time ~ Recovery_Time,
+  "Microglia Density: Overall Analysis"
+)
+
+# Regional density differences
+p2 <- create_density_plot(
+  count_data,
+  Region ~ Recovery_Time,
+  "Microglia Density: Center vs Periphery"
+)
+
+# Arrange plots
+library(patchwork)
+p1 / p2 + plot_layout(heights = c(1, 1))
+```
+
+# Morphological Parameter Analysis
+
+## Individual Parameter Visualization
+
+```{r parameter-analysis, include=TRUE}
+# Define key morphological parameters for analysis
+morphological_params <- c(
+  "Area_cell", "Perimeter_cell", "RI", "Area_Ratio", 
+  "Total_Branch", "Cyto_Area", "Skeleton_Length"
+)
+
+# Create parameter distribution plot function
+plot_morphology <- function(data, param, y_limits = NULL, treatment_labels = TRUE) {
+  
+  plot_data <- data
+  if(treatment_labels) {
+    plot_data <- plot_data %>%
+      mutate(MW = case_when(
+        MW == "Sham" ~ "OFF",
+        MW == "Stimulation" ~ "ON",
+        TRUE ~ MW
+      ))
+  }
+  
+  ggplot(plot_data, aes(x = MW, y = !!sym(param), fill = MW)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7, width = 0.3) +
+    ggdist::stat_halfeye(
+      adjust = 0.5,
+      justification = -0.2,
+      .width = 0,
+      alpha = 0.5,
+      point_colour = NA
+    ) +
+    facet_grid(Region ~ Recovery_Time) +
+    scale_fill_manual(values = c("Sham" = "darkgrey", "Stimulation" = "#E50000",
+                                 "OFF" = "darkgrey", "ON" = "#E50000")) +
+    labs(
+      title = paste("Distribution of", param),
+      x = "",
+      y = param,
+      fill = ifelse(treatment_labels, "MW Status", "Treatment")
+    ) +
+    {if(!is.null(y_limits)) ylim(y_limits)} +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 11),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+}
+
+# Example plot for Ramification Index
+plot_morphology(import$df_all, "RI", c(0.2, 1.5), FALSE)
+```
+
+# Dimensionality Reduction and Phenotypic Clustering
+
+## Data Preparation
+
+```{r data-prep-clustering, include=TRUE}
+# Subsample data for computational efficiency
+set.seed(42)
+df_subsampled <- import$df_all %>%
+  sample_frac(0.05)
+
+# Prepare data for clustering
+cluster_data <- df_subsampled %>%
+  select(where(is.numeric)) %>%
+  select(-contains(c("ImageNumber", "ObjectNumber"))) %>%
+  scale() %>%
+  as.data.frame()
+
+# Remove any constant columns
+cluster_data <- cluster_data[, apply(cluster_data, 2, function(x) length(unique(x))) > 1]
+```
+
+## Hierarchical Clustering Analysis
+
+```{r hierarchical-clustering, include=TRUE}
+# Perform hierarchical clustering on features
+hclust_result <- hclust(dist(t(cluster_data)), method = "ward.D2")
+
+# Enhanced dendrogram visualization
+fviz_dend(
+  hclust_result,
+  k = 5,
+  cex = 0.6,
+  k_colors = company_colors,
+  rect = TRUE,
+  rect_border = "jco",
+  rect_fill = TRUE,
+  horiz = TRUE,
+  main = "Hierarchical Clustering of Microglia Morphological Features",
+  xlab = "Features",
+  ylab = "Distance"
+) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.title = element_text(face = "bold")
+  )
+```
+
+## PCA and K-means Clustering
+
+```{r pca-kmeans, include=TRUE}
+# Perform PCA
+pca_result <- prcomp(cluster_data, scale. = TRUE, center = TRUE)
+
+# Determine optimal number of clusters using elbow method
+wss <- numeric(10)
+for (k in 1:10) {
+  kmeans_result <- kmeans(pca_result$x[, 1:10], centers = k, nstart = 50)
+  wss[k] <- kmeans_result$tot.withinss
+}
+
+# Identify optimal k
+optimal_k <- which.min(diff(diff(wss))) + 3
+cat("Optimal number of clusters:", optimal_k, "\n")
+
+# Perform final K-means clustering
+set.seed(42)
+kmeans_final <- kmeans(pca_result$x[, 1:10], centers = optimal_k, nstart = 50)
+
+# Add cluster assignments to subsampled data
+df_subsampled$Cluster <- as.factor(kmeans_final$cluster)
+
+# Add PCA coordinates
+pca_coords <- as.data.frame(pca_result$x[, 1:3])
+colnames(pca_coords) <- paste0("PC", 1:3)
+df_subsampled <- cbind(df_subsampled, pca_coords)
+
+# PCA visualization
+ggplot(pca_coords, aes(x = PC1, y = PC2, color = as.factor(kmeans_final$cluster))) +
+  geom_point(size = 1, alpha = 0.6) +
+  scale_color_manual(values = company_colors_2) +
+  labs(
+    title = "PCA Visualization of Microglia Phenotypes",
+    x = "Principal Component 1",
+    y = "Principal Component 2",
+    color = "Cluster"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+```
+
+## UMAP Visualization
+
+```{r umap-visualization, include=TRUE}
+# Perform UMAP
+set.seed(42)
+umap_result <- umap::umap(
+  pca_result$x[, 1:10],
+  n_neighbors = 5,
+  min_dist = 0.8,
+  n_components = 2,
+  metric = "euclidean"
+)
+
+# Create UMAP data frame
+umap_data <- data.frame(
+  UMAP1 = umap_result$layout[, 1],
+  UMAP2 = umap_result$layout[, 2],
+  Cluster = df_subsampled$Cluster,
+  MW = df_subsampled$MW,
+  Recovery_Time = df_subsampled$Recovery_Time,
+  Expo_Time = df_subsampled$Expo_Time,
+  Region = df_subsampled$Region
+)
+
+# Calculate cluster centroids
+centroids <- umap_data %>%
+  group_by(Cluster) %>%
+  summarise(
+    UMAP1_center = mean(UMAP1),
+    UMAP2_center = mean(UMAP2)
+  )
+
+# Prepare centroids with color mapping
+cluster_colors_umap <- setNames(company_colors_2[1:length(unique(umap_data$Cluster))], 
+                               unique(umap_data$Cluster))
+
+centroids_colored <- centroids %>%
+  mutate(
+    Cluster = as.factor(Cluster),
+    text_color = cluster_colors_umap[Cluster]
+  )
+
+# UMAP plot by region
+ggplot(umap_data, aes(x = UMAP1, y = UMAP2, color = Region)) +
+  geom_point(alpha = 0.7, size = 0.1) +
+  scale_color_manual(values = Region_color) +
+  labs(
+    title = "UMAP Visualization of Microglia Phenotypes",
+    subtitle = "Colored by Image Region",
+    x = "UMAP Dimension 1",
+    y = "UMAP Dimension 2",
+    color = "Region"
+  ) +
+  xlim(-10, 10) +
+  ylim(-10, 10) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5, color = "gray40"),
+    legend.position = "right"
+  )
+```
+
+# Phenotype Distribution Analysis
+
+## Cluster Composition Analysis
+
+```{r cluster-composition, include=TRUE}
+# Calculate cluster proportions
+cluster_proportions <- umap_data %>%
+  mutate(
+    MW_label = case_when(
+      MW == "Sham" ~ "OFF",
+      MW == "Stimulation" ~ "ON",
+      TRUE ~ MW
+    )
+  ) %>%
+  group_by(Expo_Time, Recovery_Time, MW_label, Region, Cluster) %>%
+  summarise(Count = n(), .groups = "drop_last") %>%
+  mutate(Proportion = Count / sum(Count)) %>%
+  ungroup()
+
+# Function to create proportion plots with statistical testing
+create_proportion_plot <- function(data, facet_formula, title, stat_test = "ks.test") {
+  
+  # Prepare statistical test results
+  stat_results <- data %>%
+    group_by(across(all.vars(facet_formula)[-1])) %>%
+    summarise(
+      p_value = suppressWarnings(
+        if(stat_test == "ks.test") {
+          ks.test(Proportion[MW_label == "OFF"], Proportion[MW_label == "ON"])$p.value
+        } else if(stat_test == "t.test") {
+          t.test(Proportion[MW_label == "OFF"], Proportion[MW_label == "ON"])$p.value
+        } else {
+          NA
+        }
+      ),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      p_label = case_when(
+        p_value < 0.001 ~ "***",
+        p_value < 0.01 ~ "**",
+        p_value < 0.05 ~ "*",
+        TRUE ~ "ns"
+      ),
+      x_pos = 1.5,
+      y_pos = 1.12
+    )
+  
+  # Create plot
+  p <- ggplot(data, aes(x = MW_label, y = Proportion, fill = Cluster)) +
+    geom_bar(position = "fill", stat = "identity") +
+    facet_grid(facet_formula) +
+    geom_text(
+      data = stat_results,
+      aes(x = x_pos, y = y_pos, label = p_label),
+      inherit.aes = FALSE,
+      size = 4,
+      fontface = "bold"
+    ) +
+    scale_fill_manual(values = company_colors_2) +
+    scale_y_continuous(labels = scales::percent_format()) +
+    labs(
+      title = title,
+      x = "",
+      y = "Proportion of Cells",
+      fill = "Phenotype"
+    ) +
+    ylim(0, 1.2) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 11),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "top",
+      strip.background = element_rect(fill = "grey90"),
+      strip.text = element_text(face = "bold")
+    )
+  
+  return(p)
+}
+
+# Overall phenotype distribution
+g1 <- create_proportion_plot(
+  cluster_proportions,
+  Expo_Time ~ Recovery_Time,
+  "Phenotype Distribution: Overall Analysis",
+  "ks.test"
+)
+
+# Regional phenotype distribution
+g2 <- create_proportion_plot(
+  cluster_proportions,
+  Region ~ Recovery_Time,
+  "Phenotype Distribution: Center vs Periphery",
+  "ks.test"
+)
+
+# Arrange plots
+g1 / g2
+```
+
+## Phenotype Characterization
+
+```{r phenotype-characterization, include=TRUE}
+# Define phenotype categories based on clustering
+df_subsampled <- df_subsampled %>%
+  mutate(
+    Phenotype = case_when(
+      Cluster %in% c(1) ~ "Homeostatic",
+      Cluster %in% c(2, 3) ~ "Large Ameboid",
+      Cluster %in% c(4, 5) ~ "Homeostatic",
+      Cluster == 6 ~ "Transition",
+      TRUE ~ "Unclassified"
+    )
+  )
+
+# Calculate phenotype proportions
+phenotype_props <- df_subsampled %>%
+  mutate(
+    MW_label = case_when(
+      MW == "Sham" ~ "OFF",
+      MW == "Stimulation" ~ "ON",
+      TRUE ~ MW
+    )
+  ) %>%
+  group_by(Expo_Time, Recovery_Time, MW_label, Region, Phenotype) %>%
+  summarise(Count = n(), .groups = "drop_last") %>%
+  mutate(Proportion = Count / sum(Count)) %>%
+  ungroup()
+
+# Create simplified phenotype plot
+ggplot(phenotype_props, aes(x = MW_label, y = Proportion, fill = Phenotype)) +
+  geom_bar(position = "fill", stat = "identity") +
+  facet_grid(Region ~ Recovery_Time) +
+  scale_fill_manual(values = c(
+    "Homeostatic" = company_colors_2[1],
+    "Large Ameboid" = company_colors_2[3],
+    "Transition" = company_colors_2[5]
+  )) +
+  labs(
+    title = "Simplified Phenotype Classification",
+    x = "",
+    y = "Proportion of Cells",
+    fill = "Phenotype"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+## Statistical Testing of Phenotype Differences
+
+```{r statistical-testing, include=TRUE}
+# Chi-square test for specific condition
+test_condition <- umap_data %>%
+  filter(Expo_Time == "30", Recovery_Time == "24")
+
+# Create contingency table
+contingency_table <- table(test_condition$MW, test_condition$Cluster)
+
+# Perform chi-square test
+chi_test <- chisq.test(contingency_table)
+
+cat("Chi-square test results for Expo_Time = 30, Recovery_Time = 24:\n")
+cat("Chi-square statistic:", chi_test$statistic, "\n")
+cat("Degrees of freedom:", chi_test$parameter, "\n")
+cat("p-value:", chi_test$p.value, "\n")
+
+# Display contingency table
+print("Contingency Table:")
+print(contingency_table)
+```
+
+# Feature Importance Analysis
+
+```{r feature-importance, include=TRUE}
+# Calculate median feature values per cluster
+feature_importance <- df_subsampled %>%
+  select(where(is.numeric) & !contains(c("ImageNumber", "ObjectNumber"))) %>%
+  mutate(Cluster = df_subsampled$Cluster) %>%
+  group_by(Cluster) %>%
+  summarise(across(everything(), median, na.rm = TRUE)) %>%
+  pivot_longer(
+    cols = -Cluster,
+    names_to = "Feature",
+    values_to = "Median_Value"
+  )
+
+# Identify top features for each cluster
+top_features <- feature_importance %>%
+  group_by(Cluster) %>%
+  slice_max(order_by = Median_Value, n = 10) %>%
+  ungroup()
+
+# Visualize top features
+ggplot(top_features, aes(x = Median_Value, y = reorder(Feature, Median_Value), 
+                         fill = as.factor(Cluster))) +
+  geom_col() +
+  facet_wrap(~ Cluster, scales = "free_y", ncol = 2) +
+  scale_fill_manual(values = company_colors_2) +
+  labs(
+    title = "Top Discriminating Features by Phenotype",
+    x = "Median Value (Scaled)",
+    y = "Morphological Feature",
+    fill = "Phenotype"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.y = element_text(size = 8),
+    strip.background = element_rect(fill = "grey90"),
+    strip.text = element_text(face = "bold")
+  )
+```
+
+# Cluster-Specific Morphology Analysis
+
+```{r cluster-specific-analysis, include=TRUE}
+# Function to visualize parameter distributions across clusters
+plot_cluster_parameter <- function(data, param, y_limits = NULL) {
+  
+  ggplot(data, aes(x = as.factor(Cluster), y = !!sym(param), fill = as.factor(Cluster))) +
+    ggdist::stat_halfeye(
+      adjust = 0.5,
+      justification = -0.2,
+      .width = 0,
+      alpha = 0.5,
+      point_colour = NA
+    ) +
+    geom_boxplot(
+      width = 0.1,
+      outlier.color = NA,
+      alpha = 0.3
+    ) +
+    scale_fill_manual(values = company_colors_2) +
+    labs(
+      title = paste("Distribution of", param, "across Phenotypes"),
+      x = "Phenotype Cluster",
+      y = param,
+      fill = "Cluster"
+    ) +
+    {if(!is.null(y_limits)) ylim(y_limits)} +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      legend.position = "right"
+    )
+}
+
+# Example plot for Ramification Index across clusters
+plot_cluster_parameter(df_subsampled, "RI")
+```
+
+# Correlation Analysis
+
+```{r correlation-analysis, include=TRUE}
+# Select key features for correlation analysis
+corr_features <- df_subsampled %>%
+  select(
+    Area_cell, Perimeter_cell, RI, Area_Ratio,
+    Total_Branch, Branch_Ends, Skeleton_Length,
+    Cyto_Area
+  ) %>%
+  drop_na()
+
+# Calculate correlation matrix
+corr_matrix <- cor(corr_features)
+
+# Create correlation heatmap with hierarchical ordering
+corrplot(
+  corr_matrix,
+  method = "color",
+  type = "upper",
+  order = "hclust",
+  tl.col = "black",
+  tl.srt = 45,
+  addCoef.col = "black",
+  number.cex = 0.7,
+  col = colorRampPalette(c("#016FB9", "white", "#FB5607"))(100),
+  title = "Correlation Matrix of Microglia Morphological Features",
+  mar = c(0, 0, 2, 0)
+)
+```
+
+# LDH Cytotoxicity Analysis (Optional)
+
+```{r ldh-analysis, include=FALSE, eval=FALSE}
+# Optional module for LDH cytotoxicity data
+# Uncomment and modify paths as needed
+
+# LDH <- list()
+# LDH$df_micro <- read_csv("path/to/ldh_microglia_data.csv")
+# 
+# ggplot(LDH$df_micro, aes(x = MW, y = norm_lum, fill = MW)) +
+#   geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+#   geom_jitter(width = 0.2, alpha = 0.5) +
+#   stat_compare_means(
+#     comparisons = list(c("Sham", "Stimulation")),
+#     method = "t.test",
+#     label = "p.signif"
+#   ) +
+#   facet_grid(Expo_Time ~ Recovery_Time) +
+#   scale_fill_manual(values = c("Sham" = "darkgrey", "Stimulation" = "#E50000")) +
+#   labs(
+#     title = "LDH Cytotoxicity Analysis",
+#     x = "",
+#     y = "Normalized Cytotoxicity (vs Control)",
+#     fill = "Treatment"
+#   ) +
+#   ylim(0.5, 1.05) +
+#   theme_minimal()
+```
+
+# Export Results
+
+```{r export-results, include=TRUE}
+# Create output directory
+output_dir <- "microglia_analysis_results"
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir)
+}
+
+# Save processed data
+write_csv(import$df_all, file.path(output_dir, "processed_microglia_data.csv"))
+write_csv(df_subsampled, file.path(output_dir, "subsampled_clustered_data.csv"))
+write_csv(cluster_proportions, file.path(output_dir, "cluster_proportions.csv"))
+write_csv(feature_importance, file.path(output_dir, "feature_importance.csv"))
+
+# Save UMAP coordinates
+write_csv(um
