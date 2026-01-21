@@ -1,0 +1,918 @@
+Here's the polished version of your LDH cytotoxicity analysis script, organized professionally with consistent formatting:
+
+```r
+---
+title: "LDH Cytotoxicity Assay Analysis Post-Microwave Stimulation"
+subtitle: "Quantitative Analysis of Cellular Viability Across Cell Types"
+author: "Vatsal D. Jariwala / Department of Neurosurgery, Freiburg"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    fig_width: 10
+    fig_height: 6
+    df_print: paged
+---
+
+```{r setup, include=FALSE, warning=FALSE, message=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  cache = FALSE,
+  fig.align = "center"
+)
+```
+
+# Project Overview
+
+This pipeline analyzes Lactate Dehydrogenase (LDH) cytotoxicity assay data to quantify cellular viability following microwave stimulation across three cell types: GBM cells, astrocytes, and microglia.
+
+## Experimental Design
+
+1. **Cell Types**: 
+   - Glioblastoma (GBM) cells
+   - Astrocytes
+   - Microglia
+
+2. **Experimental Conditions**:
+   - **Microwave Status**: ON (Stimulation) vs OFF (Sham/Control)
+   - **Exposure Times**: 5 minutes vs 30 minutes
+   - **Recovery Times**: 0 hours vs 24 hours post-exposure
+
+3. **Assay Principle**: LDH release into culture medium correlates with membrane damage and cytotoxicity
+
+# Setup and Installation
+
+## Package Management
+
+```{r package-setup, include=TRUE, warning=FALSE, message=FALSE}
+# Load required packages
+required_packages <- c(
+  # Data manipulation
+  "tidyverse", "dplyr", "tidyr", "readr", "readxl", "writexl",
+  # Visualization
+  "ggplot2", "cowplot", "ggpubr", "ggExtra", "ggdark",
+  "GGally", "gghighlight", "wesanderson", "ggstream",
+  # Statistical analysis
+  "factoextra", "corrplot", "plotrix", "moments",
+  # Advanced analysis
+  "patchwork", "clusterSim", "tidymodels", "recipes",
+  "tidytext", "embed", "corrr", "viridis", "randomForest",
+  # Utilities
+  "remotes", "devtools", "reshape2", "moonBook", "webr",
+  "Rmagic", "phateR", "scattermore", "ape", "BBmisc", "fmsb"
+)
+
+# Install missing packages
+missing_packages <- required_packages[!(required_packages %in% installed.packages()[ , "Package"])]
+if(length(missing_packages)) {
+  install.packages(missing_packages)
+}
+
+# Install Bioconductor packages
+if(!"BiocManager" %in% installed.packages()[ , "Package"]) {
+  install.packages("BiocManager")
+}
+BiocManager::install(c("ConsensusClusterPlus", "BiocParallel", "ggrast"))
+
+# Install GitHub packages
+devtools::install_github("nsgrantham/ggdark")
+remotes::install_github("davidsjoberg/ggstream")
+devtools::install_github("hrbrmstr/streamgraph")
+devtools::install_github("cardiomoon/moonBook")
+devtools::install_github("cardiomoon/webr")
+devtools::install_github('exaexa/scattermore')
+
+# Load all packages
+invisible(lapply(required_packages, library, character.only = TRUE))
+
+# Custom color palettes
+treatment_colors <- c("OFF" = "darkgrey", "ON" = "#E50000")
+condition_colors <- c("#E50000", "#008A8A", "#AF0076", "#E56800", 
+                     "#1717A0", "#E5AC00", "#00B700")
+cell_type_colors <- c("GBM" = "#FB5607", "Astrocyte" = "#016FB9", "Microglia" = "#B6C649")
+```
+
+# Data Processing Functions
+
+## Core Data Loading and Processing
+
+```{r core-functions, include=TRUE}
+# Load LDH data for different cell types
+load_ldh_data <- function(file_path, cell_type = NULL) {
+  
+  if (!file.exists(file_path)) {
+    stop("File not found: ", file_path)
+  }
+  
+  # Read data
+  df <- read_csv(file_path, show_col_types = FALSE)
+  
+  # Normalize to control (assuming control value provided)
+  control_value <- 645735.5  # This should be parameterized or calculated from data
+  df$norm_lum <- df$Lum_score / control_value
+  
+  # Add cell type if provided
+  if (!is.null(cell_type)) {
+    df$Cell_Type <- cell_type
+  }
+  
+  return(df)
+}
+
+# Annotate experimental conditions based on condition codes
+annotate_conditions <- function(df, cell_type_code) {
+  
+  # Define condition mappings based on cell type code
+  if (cell_type_code == "G") {  # GBM cells
+    condition_mapping <- list(
+      MW = c("G0" = "ON", "G1" = "OFF", "G2" = "ON", "G3" = "OFF",
+             "G4" = "ON", "G5" = "OFF", "G6" = "ON", "G7" = "OFF"),
+      Expo_Time = c("G0" = "5", "G1" = "5", "G2" = "30", "G3" = "30",
+                    "G4" = "5", "G5" = "5", "G6" = "30", "G7" = "30"),
+      Recovery_Time = c("G0" = "0", "G1" = "0", "G2" = "0", "G3" = "0",
+                        "G4" = "24", "G5" = "24", "G6" = "24", "G7" = "24")
+    )
+  } else if (cell_type_code == "A") {  # Astrocytes
+    condition_mapping <- list(
+      MW = c("A0" = "ON", "A1" = "OFF", "A2" = "ON", "A3" = "OFF",
+             "A4" = "ON", "A5" = "OFF", "A6" = "ON", "A7" = "OFF"),
+      Expo_Time = c("A0" = "5", "A1" = "5", "A2" = "30", "A3" = "30",
+                    "A4" = "5", "A5" = "5", "A6" = "30", "A7" = "30"),
+      Recovery_Time = c("A0" = "0", "A1" = "0", "A2" = "0", "A3" = "0",
+                        "A4" = "24", "A5" = "24", "A6" = "24", "A7" = "24")
+    )
+  } else if (cell_type_code == "M") {  # Microglia
+    condition_mapping <- list(
+      MW = c("M0" = "ON", "M1" = "OFF", "M2" = "ON", "M3" = "OFF",
+             "M4" = "ON", "M5" = "OFF", "M6" = "ON", "M7" = "OFF"),
+      Expo_Time = c("M0" = "5", "M1" = "5", "M2" = "30", "M3" = "30",
+                    "M4" = "5", "M5" = "5", "M6" = "30", "M7" = "30"),
+      Recovery_Time = c("M0" = "0", "M1" = "0", "M2" = "0", "M3" = "0",
+                        "M4" = "24", "M5" = "24", "M6" = "24", "M7" = "24")
+    )
+  } else {
+    stop("Unknown cell type code: ", cell_type_code)
+  }
+  
+  # Apply mappings
+  df <- df %>%
+    mutate(
+      MW = recode(Condition, !!!condition_mapping$MW),
+      Expo_Time = recode(Condition, !!!condition_mapping$Expo_Time),
+      Recovery_Time = recode(Condition, !!!condition_mapping$Recovery_Time)
+    )
+  
+  # Convert to appropriate types
+  df$Expo_Time <- factor(df$Expo_Time, levels = c("5", "30"))
+  df$Recovery_Time <- factor(df$Recovery_Time, levels = c("0", "24"))
+  df$MW <- factor(df$MW, levels = c("OFF", "ON"))
+  
+  # Remove missing values
+  df <- df %>% drop_na(norm_lum)
+  
+  return(df)
+}
+
+# Calculate summary statistics
+calculate_ldh_summary <- function(df) {
+  
+  summary_stats <- df %>%
+    group_by(Expo_Time, Recovery_Time, MW) %>%
+    summarise(
+      n = n(),
+      mean_cytotoxicity = mean(norm_lum, na.rm = TRUE),
+      sd_cytotoxicity = sd(norm_lum, na.rm = TRUE),
+      sem_cytotoxicity = sd_cytotoxicity / sqrt(n),
+      median_cytotoxicity = median(norm_lum, na.rm = TRUE),
+      iqr_cytotoxicity = IQR(norm_lum, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      lower_ci = mean_cytotoxicity - 1.96 * sem_cytotoxicity,
+      upper_ci = mean_cytotoxicity + 1.96 * sem_cytotoxicity
+    )
+  
+  return(summary_stats)
+}
+```
+
+## Statistical Analysis Functions
+
+```{r statistical-functions, include=TRUE}
+# Perform statistical tests for LDH data
+perform_ldh_statistics <- function(df, test_method = "t.test") {
+  
+  # Ensure we have both conditions for comparison
+  valid_groups <- df %>%
+    group_by(Expo_Time, Recovery_Time) %>%
+    filter(n_distinct(MW) == 2) %>%
+    ungroup()
+  
+  if (nrow(valid_groups) == 0) {
+    message("Insufficient data for statistical comparisons")
+    return(NULL)
+  }
+  
+  # Perform tests
+  if (test_method == "t.test") {
+    test_results <- valid_groups %>%
+      group_by(Expo_Time, Recovery_Time) %>%
+      t_test(norm_lum ~ MW, paired = FALSE) %>%
+      adjust_pvalue(method = "BH") %>%
+      add_significance()
+  } else if (test_method == "wilcox.test") {
+    test_results <- valid_groups %>%
+      group_by(Expo_Time, Recovery_Time) %>%
+      wilcox_test(norm_lum ~ MW, paired = FALSE) %>%
+      adjust_pvalue(method = "BH") %>%
+      add_significance()
+  } else {
+    stop("Unsupported test method: ", test_method)
+  }
+  
+  # Add effect size
+  test_results <- test_results %>%
+    add_effect_size(method = "r") %>%
+    mutate(
+      p.label = case_when(
+        p.adj < 0.001 ~ "***",
+        p.adj < 0.01 ~ "**",
+        p.adj < 0.05 ~ "*",
+        TRUE ~ "ns"
+      ),
+      # Position for plotting
+      y.position = max(df$norm_lum, na.rm = TRUE) * 1.05
+    )
+  
+  return(test_results)
+}
+
+# Calculate cytotoxicity fold changes
+calculate_fold_changes <- function(df) {
+  
+  # Calculate means for each condition
+  condition_means <- df %>%
+    group_by(Expo_Time, Recovery_Time, MW) %>%
+    summarise(mean_cytotoxicity = mean(norm_lum, na.rm = TRUE), .groups = "drop")
+  
+  # Calculate fold change relative to OFF condition
+  fold_changes <- condition_means %>%
+    pivot_wider(names_from = MW, values_from = mean_cytotoxicity) %>%
+    mutate(
+      fold_change = ON / OFF,
+      percent_change = (fold_change - 1) * 100
+    )
+  
+  return(fold_changes)
+}
+```
+
+## Visualization Functions
+
+```{r visualization-functions, include=TRUE}
+# Create standardized LDH plot
+create_ldh_plot <- function(df, cell_type_name = "", 
+                           test_method = "t.test", 
+                           plot_style = "classic",
+                           show_points = TRUE,
+                           y_limits = c(0.7, 1.15)) {
+  
+  # Perform statistical tests
+  stats_results <- perform_ldh_statistics(df, test_method = test_method)
+  
+  # Base plot
+  p <- ggplot(df, aes(x = MW, y = norm_lum, fill = MW, color = MW))
+  
+  # Add plot elements based on style
+  if (plot_style == "classic") {
+    p <- p +
+      geom_boxplot(outlier.shape = NA, alpha = 0.7, width = 0.6) +
+      (if (show_points) geom_jitter(width = 0.1, alpha = 0.5, size = 1.5))
+  } else if (plot_style == "modern") {
+    p <- p +
+      geom_violin(alpha = 0.7, trim = TRUE) +
+      geom_boxplot(width = 0.1, fill = "white", outlier.shape = NA) +
+      (if (show_points) geom_beeswarm(size = 1, alpha = 0.5, cex = 0.8))
+  } else if (plot_style == "minimal") {
+    p <- p +
+      geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+      (if (show_points) geom_point(position = position_jitter(width = 0.1), alpha = 0.5))
+  }
+  
+  # Add statistical annotations if available
+  if (!is.null(stats_results)) {
+    p <- p + stat_pvalue_manual(
+      stats_results,
+      label = "p.label",
+      tip.length = 0.01,
+      bracket.shorten = 0.05
+    )
+  }
+  
+  # Facet and customize
+  p <- p +
+    facet_grid(Expo_Time ~ Recovery_Time,
+               labeller = labeller(
+                 Expo_Time = c("5" = "5 min Exposure", "30" = "30 min Exposure"),
+                 Recovery_Time = c("0" = "0 h Recovery", "24" = "24 h Recovery")
+               )) +
+    scale_fill_manual(values = treatment_colors) +
+    scale_color_manual(values = treatment_colors) +
+    labs(
+      title = paste("LDH Cytotoxicity:", cell_type_name),
+      subtitle = paste("Statistical test:", test_method),
+      x = "",
+      y = "Normalized Cytotoxicity (vs Control)",
+      fill = "MW Status",
+      color = "MW Status"
+    ) +
+    ylim(y_limits) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
+      plot.subtitle = element_text(hjust = 0.5, color = "gray40", size = 10),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+      axis.title.y = element_text(size = 11),
+      legend.position = "none",
+      strip.background = element_rect(fill = "grey90", color = NA),
+      strip.text = element_text(face = "bold", size = 10)
+    )
+  
+  return(p)
+}
+
+# Create summary bar plot
+create_summary_bar_plot <- function(summary_df, cell_type_name = "") {
+  
+  p <- ggplot(summary_df, aes(x = MW, y = mean_cytotoxicity, fill = MW)) +
+    geom_bar(stat = "identity", position = position_dodge(), alpha = 0.8) +
+    geom_errorbar(aes(ymin = lower_ci, ymax = upper_ci),
+                  width = 0.2, position = position_dodge(0.9)) +
+    facet_grid(Expo_Time ~ Recovery_Time,
+               labeller = labeller(
+                 Expo_Time = c("5" = "5 min", "30" = "30 min"),
+                 Recovery_Time = c("0" = "0 h", "24" = "24 h")
+               )) +
+    scale_fill_manual(values = treatment_colors) +
+    labs(
+      title = paste("Mean LDH Cytotoxicity:", cell_type_name),
+      x = "",
+      y = "Mean Cytotoxicity (95% CI)",
+      fill = "MW Status"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      strip.background = element_rect(fill = "grey90"),
+      strip.text = element_text(face = "bold")
+    )
+  
+  return(p)
+}
+
+# Create fold change heatmap
+create_fold_change_heatmap <- function(fold_changes_df, cell_type_name = "") {
+  
+  p <- ggplot(fold_changes_df, aes(x = Recovery_Time, y = Expo_Time, fill = percent_change)) +
+    geom_tile(color = "white", size = 1) +
+    geom_text(aes(label = sprintf("%+.1f%%", percent_change)),
+              color = "black", size = 4, fontface = "bold") +
+    scale_fill_gradient2(
+      low = "blue",
+      mid = "white",
+      high = "red",
+      midpoint = 0,
+      name = "% Change\nvs Control",
+      limits = c(-20, 20)
+    ) +
+    labs(
+      title = paste("Cytotoxicity Changes:", cell_type_name),
+      subtitle = "Percentage change in ON vs OFF conditions",
+      x = "Recovery Time (hours)",
+      y = "Exposure Time (minutes)"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      plot.subtitle = element_text(hjust = 0.5, color = "gray40"),
+      panel.grid = element_blank(),
+      axis.text = element_text(size = 10),
+      legend.position = "right"
+    )
+  
+  return(p)
+}
+
+# Create combined cell type comparison
+create_cell_type_comparison_plot <- function(all_data_list) {
+  
+  # Combine all data
+  combined_data <- bind_rows(all_data_list, .id = "Cell_Type")
+  
+  # Calculate summary statistics
+  summary_data <- combined_data %>%
+    group_by(Cell_Type, Expo_Time, Recovery_Time, MW) %>%
+    summarise(
+      mean_cytotoxicity = mean(norm_lum, na.rm = TRUE),
+      sem_cytotoxicity = sd(norm_lum, na.rm = TRUE) / sqrt(n()),
+      .groups = "drop"
+    )
+  
+  p <- ggplot(summary_data, 
+              aes(x = interaction(Expo_Time, Recovery_Time), 
+                  y = mean_cytotoxicity, 
+                  color = Cell_Type,
+                  group = Cell_Type)) +
+    geom_line(size = 1, alpha = 0.7) +
+    geom_point(size = 3) +
+    geom_errorbar(aes(ymin = mean_cytotoxicity - sem_cytotoxicity,
+                      ymax = mean_cytotoxicity + sem_cytotoxicity),
+                  width = 0.2, size = 0.8) +
+    facet_wrap(~ MW, nrow = 1,
+               labeller = labeller(MW = c("OFF" = "Control", "ON" = "Stimulation"))) +
+    scale_color_manual(values = cell_type_colors) +
+    labs(
+      title = "Comparative Cytotoxicity Across Cell Types",
+      x = "Condition (Exposure Time | Recovery Time)",
+      y = "Mean Normalized Cytotoxicity",
+      color = "Cell Type"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
+      axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+      axis.title.x = element_text(size = 11),
+      legend.position = "bottom",
+      strip.background = element_rect(fill = "grey90"),
+      strip.text = element_text(face = "bold", size = 11)
+    )
+  
+  return(p)
+}
+```
+
+# Analysis Pipeline
+
+## GBM Cell Analysis
+
+```{r gbm-analysis, include=TRUE}
+# Load and process GBM data
+analyze_gbm_ldh <- function(data_path = NULL, 
+                           test_method = "t.test",
+                           plot_style = "classic") {
+  
+  if (is.null(data_path)) {
+    # For demonstration, create sample data
+    set.seed(42)
+    gbm_data <- tibble(
+      Condition = rep(c("G0", "G1", "G2", "G3", "G4", "G5", "G6", "G7"), each = 8),
+      Lum_score = c(
+        rnorm(8, 700000, 50000),  # G0
+        rnorm(8, 650000, 45000),  # G1
+        rnorm(8, 750000, 55000),  # G2
+        rnorm(8, 660000, 48000),  # G3
+        rnorm(8, 720000, 52000),  # G4
+        rnorm(8, 640000, 47000),  # G5
+        rnorm(8, 780000, 60000),  # G6
+        rnorm(8, 630000, 46000)   # G7
+      )
+    )
+  } else {
+    gbm_data <- load_ldh_data(data_path, cell_type = "GBM")
+  }
+  
+  # Annotate conditions
+  gbm_annotated <- annotate_conditions(gbm_data, "G")
+  
+  # Calculate summary statistics
+  gbm_summary <- calculate_ldh_summary(gbm_annotated)
+  
+  # Calculate fold changes
+  gbm_fold_changes <- calculate_fold_changes(gbm_annotated)
+  
+  # Create plots
+  plots <- list()
+  plots$main <- create_ldh_plot(gbm_annotated, "GBM Cells", test_method, plot_style)
+  plots$summary <- create_summary_bar_plot(gbm_summary, "GBM Cells")
+  plots$fold_change <- create_fold_change_heatmap(gbm_fold_changes, "GBM Cells")
+  
+  # Perform statistical analysis
+  stats <- perform_ldh_statistics(gbm_annotated, test_method)
+  
+  return(list(
+    data = gbm_annotated,
+    summary = gbm_summary,
+    fold_changes = gbm_fold_changes,
+    statistics = stats,
+    plots = plots
+  ))
+}
+
+# Run GBM analysis
+gbm_results <- analyze_gbm_ldh(test_method = "t.test", plot_style = "classic")
+
+# Display main plot
+gbm_results$plots$main
+```
+
+## Astrocyte Analysis
+
+```{r astrocyte-analysis, include=TRUE}
+analyze_astrocyte_ldh <- function(data_path = NULL,
+                                 test_method = "wilcox.test",
+                                 plot_style = "classic") {
+  
+  if (is.null(data_path)) {
+    # For demonstration, create sample data
+    set.seed(42)
+    astro_data <- tibble(
+      Condition = rep(c("A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7"), each = 8),
+      Lum_score = c(
+        rnorm(8, 680000, 40000),  # A0
+        rnorm(8, 620000, 35000),  # A1
+        rnorm(8, 720000, 45000),  # A2
+        rnorm(8, 630000, 38000),  # A3
+        rnorm(8, 690000, 42000),  # A4
+        rnorm(8, 610000, 36000),  # A5
+        rnorm(8, 710000, 44000),  # A6
+        rnorm(8, 600000, 34000)   # A7
+      )
+    )
+  } else {
+    astro_data <- load_ldh_data(data_path, cell_type = "Astrocyte")
+  }
+  
+  # Annotate conditions
+  astro_annotated <- annotate_conditions(astro_data, "A")
+  
+  # Calculate summary statistics
+  astro_summary <- calculate_ldh_summary(astro_annotated)
+  
+  # Calculate fold changes
+  astro_fold_changes <- calculate_fold_changes(astro_annotated)
+  
+  # Create plots
+  plots <- list()
+  plots$main <- create_ldh_plot(astro_annotated, "Astrocytes", test_method, plot_style)
+  plots$summary <- create_summary_bar_plot(astro_summary, "Astrocytes")
+  plots$fold_change <- create_fold_change_heatmap(astro_fold_changes, "Astrocytes")
+  
+  # Perform statistical analysis
+  stats <- perform_ldh_statistics(astro_annotated, test_method)
+  
+  return(list(
+    data = astro_annotated,
+    summary = astro_summary,
+    fold_changes = astro_fold_changes,
+    statistics = stats,
+    plots = plots
+  ))
+}
+
+# Run astrocyte analysis
+astro_results <- analyze_astrocyte_ldh(test_method = "wilcox.test", plot_style = "classic")
+
+# Display main plot
+astro_results$plots$main
+```
+
+## Microglia Analysis
+
+```{r microglia-analysis, include=TRUE}
+analyze_microglia_ldh <- function(data_path = NULL,
+                                 test_method = "t.test",
+                                 plot_style = "classic") {
+  
+  if (is.null(data_path)) {
+    # For demonstration, create sample data
+    set.seed(42)
+    micro_data <- tibble(
+      Condition = rep(c("M0", "M1", "M2", "M3", "M4", "M5", "M6", "M7"), each = 8),
+      Lum_score = c(
+        rnorm(8, 710000, 48000),  # M0
+        rnorm(8, 640000, 42000),  # M1
+        rnorm(8, 760000, 52000),  # M2
+        rnorm(8, 650000, 43000),  # M3
+        rnorm(8, 700000, 47000),  # M4
+        rnorm(8, 630000, 41000),  # M5
+        rnorm(8, 770000, 53000),  # M6
+        rnorm(8, 620000, 40000)   # M7
+      )
+    )
+  } else {
+    micro_data <- load_ldh_data(data_path, cell_type = "Microglia")
+  }
+  
+  # Annotate conditions
+  micro_annotated <- annotate_conditions(micro_data, "M")
+  
+  # Calculate summary statistics
+  micro_summary <- calculate_ldh_summary(micro_annotated)
+  
+  # Calculate fold changes
+  micro_fold_changes <- calculate_fold_changes(micro_annotated)
+  
+  # Create plots
+  plots <- list()
+  plots$main <- create_ldh_plot(micro_annotated, "Microglia", test_method, plot_style)
+  plots$summary <- create_summary_bar_plot(micro_summary, "Microglia")
+  plots$fold_change <- create_fold_change_heatmap(micro_fold_changes, "Microglia")
+  
+  # Perform statistical analysis
+  stats <- perform_ldh_statistics(micro_annotated, test_method)
+  
+  return(list(
+    data = micro_annotated,
+    summary = micro_summary,
+    fold_changes = micro_fold_changes,
+    statistics = stats,
+    plots = plots
+  ))
+}
+
+# Run microglia analysis
+micro_results <- analyze_microglia_ldh(test_method = "t.test", plot_style = "classic")
+
+# Display main plot
+micro_results$plots$main
+```
+
+# Comparative Analysis
+
+## Compare All Cell Types
+
+```{r comparative-analysis, include=TRUE}
+# Combine all analyses for comparison
+compare_all_cell_types <- function(gbm_results, astro_results, micro_results) {
+  
+  # Extract data from each analysis
+  all_data <- list(
+    GBM = gbm_results$data,
+    Astrocyte = astro_results$data,
+    Microglia = micro_results$data
+  )
+  
+  # Create combined plot
+  comparison_plot <- create_cell_type_comparison_plot(all_data)
+  
+  # Calculate comparative statistics
+  combined_stats <- bind_rows(
+    GBM = gbm_results$statistics %>% mutate(Cell_Type = "GBM"),
+    Astrocyte = astro_results$statistics %>% mutate(Cell_Type = "Astrocyte"),
+    Microglia = micro_results$statistics %>% mutate(Cell_Type = "Microglia"),
+    .id = "id"
+  )
+  
+  # Create summary table
+  summary_table <- bind_rows(
+    gbm_results$fold_changes %>% mutate(Cell_Type = "GBM"),
+    astro_results$fold_changes %>% mutate(Cell_Type = "Astrocyte"),
+    micro_results$fold_changes %>% mutate(Cell_Type = "Microglia")
+  )
+  
+  return(list(
+    comparison_plot = comparison_plot,
+    combined_stats = combined_stats,
+    summary_table = summary_table,
+    all_data = all_data
+  ))
+}
+
+# Run comparative analysis
+comparative_results <- compare_all_cell_types(gbm_results, astro_results, micro_results)
+
+# Display comparative plot
+comparative_results$comparison_plot
+```
+
+## Create Summary Dashboard
+
+```{r summary-dashboard, include=TRUE}
+create_ldh_dashboard <- function(gbm_results, astro_results, micro_results, comparative_results) {
+  
+  # Combine main plots
+  main_plots <- cowplot::plot_grid(
+    gbm_results$plots$main + labs(title = "GBM Cells"),
+    astro_results$plots$main + labs(title = "Astrocytes"),
+    micro_results$plots$main + labs(title = "Microglia"),
+    ncol = 3,
+    labels = c("A", "B", "C"),
+    label_size = 14
+  )
+  
+  # Combine fold change plots
+  fold_change_plots <- cowplot::plot_grid(
+    gbm_results$plots$fold_change + labs(title = "GBM"),
+    astro_results$plots$fold_change + labs(title = "Astrocytes"),
+    micro_results$plots$fold_change + labs(title = "Microglia"),
+    ncol = 3,
+    labels = c("D", "E", "F"),
+    label_size = 14
+  )
+  
+  # Create comprehensive dashboard
+  dashboard <- cowplot::plot_grid(
+    main_plots,
+    comparative_results$comparison_plot,
+    fold_change_plots,
+    nrow = 3,
+    rel_heights = c(1, 1, 0.8),
+    labels = c("", "G", ""),
+    label_size = 14
+  )
+  
+  return(dashboard)
+}
+
+# Create dashboard
+ldh_dashboard <- create_ldh_dashboard(gbm_results, astro_results, micro_results, comparative_results)
+
+# Display dashboard
+ldh_dashboard
+```
+
+# Export and Reporting
+
+```{r export-functions, include=TRUE}
+export_ldh_analysis <- function(results_list, output_dir) {
+  
+  # Create output directory
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+  # Export data for each cell type
+  for (cell_type in names(results_list)) {
+    if (cell_type %in% c("gbm_results", "astro_results", "micro_results")) {
+      
+      results <- results_list[[cell_type]]
+      cell_name <- gsub("_results", "", cell_type)
+      
+      # Save data
+      write_csv(results$data, file.path(output_dir, paste0(cell_name, "_data.csv")))
+      write_csv(results$summary, file.path(output_dir, paste0(cell_name, "_summary.csv")))
+      write_csv(results$fold_changes, file.path(output_dir, paste0(cell_name, "_fold_changes.csv")))
+      
+      if (!is.null(results$statistics)) {
+        write_csv(results$statistics, file.path(output_dir, paste0(cell_name, "_statistics.csv")))
+      }
+      
+      # Save plots
+      for (plot_name in names(results$plots)) {
+        ggsave(
+          filename = file.path(output_dir, paste0(cell_name, "_", plot_name, ".png")),
+          plot = results$plots[[plot_name]],
+          width = 10, height = 8, dpi = 300
+        )
+      }
+    }
+  }
+  
+  # Export comparative results if available
+  if ("comparative_results" %in% names(results_list)) {
+    comp_results <- results_list$comparative_results
+    
+    write_csv(comp_results$combined_stats, 
+              file.path(output_dir, "comparative_statistics.csv"))
+    write_csv(comp_results$summary_table, 
+              file.path(output_dir, "summary_table.csv"))
+    
+    ggsave(
+      filename = file.path(output_dir, "cell_type_comparison.png"),
+      plot = comp_results$comparison_plot,
+      width = 12, height = 8, dpi = 300
+    )
+  }
+  
+  # Save dashboard
+  if ("ldh_dashboard" %in% names(results_list)) {
+    ggsave(
+      filename = file.path(output_dir, "ldh_analysis_dashboard.png"),
+      plot = results_list$ldh_dashboard,
+      width = 16, height = 14, dpi = 300
+    )
+  }
+  
+  # Create summary report
+  create_summary_report(results_list, file.path(output_dir, "analysis_summary.md"))
+  
+  cat("Analysis results exported to:", output_dir, "\n")
+}
+
+create_summary_report <- function(results_list, output_file) {
+  
+  report_text <- c(
+    "# LDH Cytotoxicity Analysis Summary",
+    paste("Generated on:", Sys.Date()),
+    "",
+    "## Overview",
+    "Analysis of LDH release as a measure of cellular cytotoxicity following microwave stimulation.",
+    "",
+    "## Key Findings",
+    "",
+    "### GBM Cells",
+    paste("- Number of samples:", nrow(results_list$gbm_results$data)),
+    paste("- Overall cytotoxicity range:", 
+          round(min(results_list$gbm_results$data$norm_lum), 3), "to",
+          round(max(results_list$gbm_results$data$norm_lum), 3)),
+    "",
+    "### Astrocytes",
+    paste("- Number of samples:", nrow(results_list$astro_results$data)),
+    paste("- Overall cytotoxicity range:", 
+          round(min(results_list$astro_results$data$norm_lum), 3), "to",
+          round(max(results_list$astro_results$data$norm_lum), 3)),
+    "",
+    "### Microglia",
+    paste("- Number of samples:", nrow(results_list$micro_results$data)),
+    paste("- Overall cytotoxicity range:", 
+          round(min(results_list$micro_results$data$norm_lum), 3), "to",
+          round(max(results_list$micro_results$data$norm_lum), 3)),
+    "",
+    "## Statistical Significance",
+    "Detailed statistical results are available in the exported CSV files.",
+    "",
+    "## Notes",
+    "- All cytotoxicity values normalized to control condition",
+    "- Statistical tests adjusted for multiple comparisons using Benjamini-Hochberg method",
+    "- Error bars represent 95% confidence intervals where applicable"
+  )
+  
+  writeLines(report_text, output_file)
+  cat("Summary report created:", output_file, "\n")
+}
+
+# Example export (commented out)
+# results_to_export <- list(
+#   gbm_results = gbm_results,
+#   astro_results = astro_results,
+#   micro_results = micro_results,
+#   comparative_results = comparative_results,
+#   ldh_dashboard = ldh_dashboard
+# )
+# 
+# export_ldh_analysis(results_to_export, "/path/to/output/directory")
+```
+
+# Session Information
+
+```{r session-info, include=TRUE}
+sessionInfo()
+```
+
+# Usage Instructions
+
+## Quick Start
+
+1. **Prepare Data**: Ensure LDH assay data is in CSV format with appropriate columns
+2. **Set Paths**: Update data paths in the analysis functions
+3. **Run Analyses**: Execute cell type-specific analysis functions
+4. **Review Results**: Check the generated plots and summary statistics
+
+## Customization Options
+
+- **Statistical Tests**: Choose between `t.test` and `wilcox.test`
+- **Plot Styles**: Select from `classic`, `modern`, or `minimal` styles
+- **Thresholds**: Adjust cytotoxicity thresholds as needed
+- **Normalization**: Modify control normalization if different from provided value
+
+## Interpretation Guidelines
+
+1. **Cytotoxicity Values**:
+   - <1.0: Less cytotoxicity than control
+   - 1.0: Equivalent to control
+   - >1.0: Greater cytotoxicity than control
+
+2. **Statistical Significance**:
+   - * p < 0.05
+   - ** p < 0.01
+   - *** p < 0.001
+
+3. **Biological Relevance**:
+   - Consider fold changes in context of experimental conditions
+   - Compare across cell types for differential sensitivity
+   - Evaluate dose-response relationships with exposure time
+
+## Output Files
+
+The pipeline generates:
+- Processed data files for each cell type
+- Summary statistics tables
+- Statistical test results
+- Multiple plot formats
+- Comprehensive dashboard view
+- Analysis summary report
+
+---
+
+*This LDH cytotoxicity analysis pipeline provides quantitative assessment of cellular viability following microwave stimulation. For technical support or custom modifications, please contact the authors.*
+
+**Citation**: If using this pipeline, please acknowledge appropriately.
+```
