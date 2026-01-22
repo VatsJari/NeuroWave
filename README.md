@@ -325,16 +325,6 @@ If you use this software in your research, please cite:
 - **Visualization-Rich**: Publication-ready plots and figures
 - **Statistical Rigor**: Multiple testing corrections and effect sizes
 
-## 🔄 Updates and Versioning
-
-This repository uses semantic versioning (MAJOR.MINOR.PATCH):
-
-- **MAJOR**: Breaking changes
-- **MINOR**: New features, backward compatible
-- **PATCH**: Bug fixes, documentation updates
-
-Check the [CHANGELOG.md](CHANGELOG.md) for version history and updates.
-
 ---
 
 **Happy Analyzing!** 🧬🔬📊
