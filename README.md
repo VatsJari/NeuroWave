@@ -301,7 +301,7 @@ For questions, issues, or feature requests:
 1. **Check the documentation**: Review this README and inline documentation
 2. **Search existing issues**: Your question might already be answered
 3. **Open a new issue**: Provide a minimal reproducible example
-4. **Contact maintainers**: [Your Email/Contact Information]
+4. **Contact maintainers**: [Vatsal D. Jariwala]
 
 ## 📊 Citation
 
